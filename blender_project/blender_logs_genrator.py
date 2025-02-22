@@ -337,9 +337,68 @@ def main():
 
     show_message(f"\nSimulation complete. To recreate this exact arrangement, use seed: {seed}")
 
+def generate_dataset(start_logs=1, end_logs=20, samples_per_count=50):
+    """
+    Generate a dataset with varying numbers of logs
+    
+    Args:
+        start_logs: Starting number of logs (default 1)
+        end_logs: Maximum number of logs (default 20)
+        samples_per_count: Number of samples to generate for each log count (default 50)
+    """
+    global NUM_LOGS  # Move global declaration to top of function
+    
+    total_simulations = (end_logs - start_logs + 1) * samples_per_count
+    current_simulation = 0
+    
+    show_message("\n=== Starting Dataset Generation ===")
+    show_message(f"Will generate {samples_per_count} samples each for {start_logs} to {end_logs} logs")
+    show_message(f"Total simulations to run: {total_simulations}\n")
+    
+    # Store original NUM_LOGS value
+    original_num_logs = NUM_LOGS
+    
+    try:
+        # Generate samples for each log count
+        for log_count in range(start_logs, end_logs + 1):
+            show_message(f"\n=== Generating samples with {log_count} logs ===")
+            
+            # Update NUM_LOGS for this batch
+            NUM_LOGS = log_count
+            
+            # Generate specified number of samples for this log count
+            for sample in range(samples_per_count):
+                current_simulation += 1
+                show_message(f"\nSimulation {current_simulation}/{total_simulations}")
+                show_message(f"Sample {sample + 1}/{samples_per_count} with {log_count} logs")
+                
+                # Run a single simulation
+                main()
+                
+                # Small delay to ensure file system operations complete
+                time.sleep(1)
+            
+            show_message(f"Completed {samples_per_count} samples with {log_count} logs")
+        
+        show_message("\n=== Dataset Generation Complete ===")
+        show_message(f"Generated {total_simulations} total samples")
+        
+    except Exception as e:
+        show_message(f"\nError during dataset generation: {str(e)}")
+        show_message(traceback.format_exc())
+    
+    finally:
+        # Restore original NUM_LOGS value
+        NUM_LOGS = original_num_logs
+
 if __name__ == "__main__":
     try:
-        main()
+        # Generate dataset instead of single simulation
+        generate_dataset(
+            start_logs=1,      # Start with 1 log
+            end_logs=20,       # Up to 20 logs
+            samples_per_count=50  # 50 samples for each log count
+        )
     except Exception as e:
         show_message(f"Error occurred: {str(e)}")
         show_message(traceback.format_exc())

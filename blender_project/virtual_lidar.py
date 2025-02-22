@@ -10,19 +10,17 @@ import traceback
 class VirtualLidarScanner:
     def __init__(self, output_dir="C:\\output", message_callback=None):
         self.output_dir = output_dir
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]  # Include milliseconds
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
         self.metadata_seed = None
-        self.show_message = message_callback or (lambda x: None)  # Default no-op if no callback provided
+        self.show_message = message_callback or (lambda x: None)
         
-        # Create output directory if it doesn't exist
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-            
-        # Reduced LiDAR parameters
-        self.resolution = 64  # Reduced from 256
-        self.vertical_fov = 45
+        
+        # LiDAR parameters
+        self.resolution = 256  # Higher resolution for better detail
         self.max_distance = 100
-        self.batch_size = 1000  # Process rays in batches
+        self.batch_size = 1000
         
     def capture_scene(self):
         """Capture the current scene state and generate all outputs"""
@@ -81,37 +79,55 @@ class VirtualLidarScanner:
         """Generate point cloud data from virtual LiDAR scan with batching"""
         points = []
         
-        # Calculate scan parameters
-        vertical_step = self.vertical_fov / self.resolution
-        horizontal_step = 360.0 / self.resolution
+        # Get camera parameters
+        cam_data = camera.data
         
-        # Cast rays from camera position
-        origin = camera.location
-        self.show_message(f"Starting point cloud generation from camera at {origin}")
+        # Calculate FOV from camera data
+        vertical_fov = math.degrees(cam_data.angle_y)  # Get vertical FOV from camera
+        aspect_ratio = bpy.context.scene.render.resolution_x / bpy.context.scene.render.resolution_y
+        horizontal_fov = math.degrees(cam_data.angle_x)  # Get horizontal FOV from camera
+        
+        # Calculate scan parameters
+        vertical_step = vertical_fov / self.resolution
+        horizontal_step = horizontal_fov / self.resolution
+        
+        # Get camera orientation and position
+        cam_matrix = camera.matrix_world
+        origin = cam_matrix.translation
+        
+        self.show_message("\nCamera Debug Info:")
+        self.show_message(f"Camera Matrix:\n{cam_matrix}")
+        self.show_message(f"Camera Location: {origin}")
+        self.show_message(f"FOV - H: {horizontal_fov:.1f}°, V: {vertical_fov:.1f}°")
         
         try:
             total_points = self.resolution * self.resolution
             points_processed = 0
             ray_batch = []
+            hits = 0
             
             for v in range(self.resolution):
-                vertical_angle = -self.vertical_fov/2 + v * vertical_step
+                # Scan from top to bottom (to match camera view)
+                vertical_angle = (vertical_fov/2) - (v * vertical_step)
                 
                 for h in range(self.resolution):
-                    horizontal_angle = h * horizontal_step
+                    # Scan from left to right
+                    horizontal_angle = (-horizontal_fov/2) + (h * horizontal_step)
                     
-                    # Calculate ray direction
+                    # Create direction vector in camera space
+                    # Note: In Blender, camera looks down -Z, with Y up and X right
                     direction = Vector((
-                        math.cos(math.radians(horizontal_angle)) * math.cos(math.radians(vertical_angle)),
-                        math.sin(math.radians(horizontal_angle)) * math.cos(math.radians(vertical_angle)),
-                        math.sin(math.radians(vertical_angle))
-                    ))
+                        math.tan(math.radians(horizontal_angle)),  # X (right)
+                        math.tan(math.radians(vertical_angle)),    # Y (up)
+                        -1.0                                       # -Z (forward)
+                    )).normalized()
                     
-                    ray_batch.append((origin, direction))
+                    # Transform to world space using camera matrix
+                    world_direction = cam_matrix.to_3x3() @ direction
                     
-                    # Process batch when it's full or at the end
+                    ray_batch.append((origin, world_direction))
+                    
                     if len(ray_batch) >= self.batch_size or (v == self.resolution-1 and h == self.resolution-1):
-                        # Process current batch
                         for ray_origin, ray_direction in ray_batch:
                             result = bpy.context.scene.ray_cast(
                                 bpy.context.view_layer.depsgraph,
@@ -121,21 +137,27 @@ class VirtualLidarScanner:
                             )
                             
                             if result[0]:  # If hit something
-                                points.append(result[1])
+                                hit_point = result[1]
+                                # Add point if it's in front of camera
+                                local_hit = hit_point - origin
+                                if local_hit.dot(world_direction) > 0:
+                                    points.append([hit_point[0], hit_point[1], hit_point[2]])
+                                    hits += 1
                         
-                        # Update progress
                         points_processed += len(ray_batch)
-                        self.show_message(f"Point cloud generation: {(points_processed/total_points)*100:.1f}% complete ({len(points)} points found)")
-                        
-                        # Clear batch
-                        ray_batch = []
-                        
-                        # Give Blender a chance to update
                         if points_processed % (self.batch_size * 4) == 0:
+                            self.show_message(f"Progress: {(points_processed/total_points)*100:.1f}% - {hits} hits")
                             bpy.context.view_layer.update()
+                        
+                        ray_batch = []
             
-            self.show_message(f"Point cloud generation complete. Collected {len(points)} points")
-            return np.array(points)
+            self.show_message(f"\nScan complete:")
+            self.show_message(f"- Processed {points_processed} rays")
+            self.show_message(f"- Found {hits} hits ({(hits/total_points)*100:.1f}%)")
+            
+            points_array = np.array(points, dtype=np.float32).reshape(-1, 3)
+            self.show_message(f"- Final shape: {points_array.shape}")
+            return points_array
             
         except Exception as e:
             error_msg = f"Error generating point cloud: {str(e)}\n{traceback.format_exc()}"
