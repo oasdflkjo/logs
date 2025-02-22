@@ -186,56 +186,6 @@ def spawn_log(index):
     
     return log
 
-def frame_change_handler(scene):
-    """Simple frame change handler with better error handling"""
-    try:
-        # Get the last capture frame
-        last_capture = scene.get('last_capture_frame', 0)
-        current_frame = scene.frame_current
-        
-        show_message(f"Frame handler: current={current_frame}, last_capture={last_capture}")
-        
-        # Only capture if we're at the end and haven't captured recently
-        if (current_frame == scene.frame_end and 
-            current_frame != last_capture):
-            
-            show_message("\nEnd of animation loop - attempting capture...")
-            
-            try:
-                # Stop the animation first
-                bpy.ops.screen.animation_cancel()
-                
-                # Wait a moment for physics to settle
-                bpy.context.view_layer.update()
-                
-                # Attempt capture
-                scanner = VirtualLidarScanner()
-                scanner.metadata_seed = scene.get('random_seed', None)
-                capture_final_state(scanner)
-                
-                # Update last capture frame only if capture succeeds
-                scene['last_capture_frame'] = current_frame
-                show_message("Capture complete")
-                
-                # Reset to start frame
-                scene.frame_current = scene.frame_start
-                
-            except Exception as capture_error:
-                show_message(f"Capture error: {str(capture_error)}")
-                show_message(traceback.format_exc())
-                # Force animation to stop and reset
-                bpy.ops.screen.animation_cancel()
-                scene.frame_current = scene.frame_start
-                # Mark as captured anyway to prevent loop
-                scene['last_capture_frame'] = current_frame
-            
-    except Exception as e:
-        show_message(f"Frame handler error: {str(e)}")
-        show_message(traceback.format_exc())
-        # Emergency stop
-        bpy.ops.screen.animation_cancel()
-        scene.frame_current = scene.frame_start
-
 def setup_scene():
     # Set up the physics scene
     scene = bpy.context.scene
@@ -255,6 +205,9 @@ def setup_scene():
     scene.frame_start = 1
     scene.frame_end = SIMULATION_FRAMES
     scene.frame_current = 1
+    
+    # Remove all frame handlers to prevent any automatic animation callbacks
+    bpy.app.handlers.frame_change_post.clear()
     
     # Basic animation settings
     scene.render.fps = 24
@@ -299,10 +252,6 @@ def setup_scene():
     # Initialize last capture frame
     scene['last_capture_frame'] = 0
     
-    # Set up frame handler
-    bpy.app.handlers.frame_change_post.clear()
-    bpy.app.handlers.frame_change_post.append(frame_change_handler)
-    
     # Set up basic materials and lighting
     setup_materials()
     setup_lighting()
@@ -314,8 +263,6 @@ def setup_scene():
             area.spaces[0].shading.light = 'STUDIO'
             area.spaces[0].shading.color_type = 'MATERIAL'
             break
-    
-    show_message("Added automatic capture at end of each loop")
 
 def run_physics_simulation(frame_count):
     scene = bpy.context.scene
@@ -326,10 +273,13 @@ def run_physics_simulation(frame_count):
     # Free bake if it exists
     bpy.ops.ptcache.free_bake_all()
     
-    # Let the physics initialize
-    bpy.context.view_layer.update()
+    # Run the physics simulation without animation
+    for frame in range(1, frame_count + 1):
+        scene.frame_set(frame)
+        if frame % 50 == 0:  # Progress update every 50 frames
+            show_message(f"Simulating physics: frame {frame}/{frame_count}")
     
-    show_message("Physics ready - press Alt+A to play animation")
+    show_message("Physics simulation complete")
 
 def main():
     # Set random seed at the start
@@ -364,13 +314,22 @@ def main():
         
         show_message(f"Spawned {logs_spawned}/{NUM_LOGS} logs...")
     
-    show_message("Scene setup complete. You can now:")
-    show_message("1. Press Alt+A to play/restart the animation")
-    show_message("2. Press Spacebar to pause")
-    show_message("3. Use the timeline to scrub through the animation")
-    show_message(f"4. To recreate this exact arrangement, use seed: {seed}")
+    # Run the full physics simulation
+    show_message("\nRunning physics simulation...")
+    run_physics_simulation(SIMULATION_FRAMES)
     
-    show_message("\nAutomatic capture enabled - new images will be taken at the end of each loop")
+    # Capture the final state
+    show_message("\nCapturing final state...")
+    try:
+        scanner = VirtualLidarScanner()
+        scanner.metadata_seed = seed
+        capture_final_state(scanner)
+        show_message("Capture complete")
+    except Exception as e:
+        show_message(f"Capture error: {str(e)}")
+        show_message(traceback.format_exc())
+
+    show_message(f"\nSimulation complete. To recreate this exact arrangement, use seed: {seed}")
 
 if __name__ == "__main__":
     try:
