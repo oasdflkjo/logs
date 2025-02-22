@@ -6,45 +6,52 @@ class PointNet(nn.Module):
     def __init__(self, num_classes=21):
         super(PointNet, self).__init__()
         
-        # Initial feature extraction
+        # Initial feature extraction with more channels
         self.input_transform = nn.Sequential(
-            nn.Conv1d(3, 32, 1),
-            nn.BatchNorm1d(32),
+            nn.Conv1d(3, 64, 1),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Conv1d(32, 32, 1),
-            nn.BatchNorm1d(32),
+            nn.Conv1d(64, 64, 1),
+            nn.BatchNorm1d(64),
             nn.ReLU()
         )
         
-        # Local feature aggregation
+        # Local feature aggregation (deeper)
         self.local_features = nn.Sequential(
-            nn.Conv1d(32, 64, 1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
             nn.Conv1d(64, 128, 1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Conv1d(128, 128, 1),
             nn.BatchNorm1d(128),
             nn.ReLU()
         )
         
-        # Global feature extraction
+        # Global feature extraction (wider)
         self.global_features = nn.Sequential(
             nn.Conv1d(128, 256, 1),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Conv1d(256, 512, 1),
             nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Conv1d(512, 1024, 1),
+            nn.BatchNorm1d(1024),
             nn.ReLU()
         )
         
-        # Counting-specific layers
+        # Counting-specific layers with residual connections
         self.count_features = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.3),
             nn.Linear(512, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
+            nn.Dropout(0.3),
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.BatchNorm1d(128),
-            nn.Dropout(0.2),
             nn.Linear(128, num_classes)
         )
         

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from dataset import PointCloudDataset
 from pointnet_modified import PointNet
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
+import random
 
 # Setup
 device = torch_directml.device()
@@ -40,8 +42,14 @@ for idx in range(len(dataset)):
 sampler = torch.utils.data.WeightedRandomSampler(weights, len(dataset))
 
 # Create data loader with sampler
-batch_size = 32
-dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+batch_size = 8  # Smaller batch size for better generalization
+dataloader = DataLoader(
+    dataset, 
+    batch_size=batch_size, 
+    sampler=sampler,
+    num_workers=0,
+    pin_memory=False
+)
 
 # Model and optimizer
 model = PointNet(num_classes=21).to(device)
@@ -65,25 +73,39 @@ class EarlyStopping:
                 self.early_stop = True
 
 # Modify the training setup
-def setup_training(model, learning_rate=0.01):
+def setup_training(model, learning_rate=0.01):  # Reduced initial LR
+    # Add BatchNorm momentum for better training
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm1d):
+            m.momentum = 0.01
+    
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=learning_rate,
         momentum=0.9,
-        weight_decay=0.0001,
+        weight_decay=0.001,  # Adjusted weight decay
         nesterov=True
     )
     
-    criterion = nn.CrossEntropyLoss()
+    # Improved class weights calculation
+    class_weights = torch.ones(21)
+    total_samples = sum(len(samples) for samples in dataset.data_by_log_count.values())
+    for i in range(21):
+        samples = len(dataset.data_by_log_count.get(i, []))
+        if samples > 0:
+            class_weights[i] = total_samples / (21 * samples)  # Balanced weighting
     
-    # Modified scheduler for longer training
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    class_weights = class_weights.to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
+    # More conservative scheduler
+    scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
-        factor=0.5,
-        patience=5,
+        factor=0.5,    # More gentle reduction
+        patience=5,    # More patience
         verbose=True,
-        min_lr=1e-6
+        min_lr=1e-5
     )
     
     return optimizer, criterion, scheduler
@@ -146,11 +168,27 @@ def train_one_epoch():
     targets = []
     
     for points, labels in dataloader:
-        optimizer.zero_grad()
+        # Zero grad with model.zero_grad() instead
+        model.zero_grad(set_to_none=True)
+        
+        # Add some noise to points for regularization
+        if random.random() < 0.5:  # 50% chance of noise
+            points += torch.randn_like(points) * 0.01
+        
         outputs = model(points)
         labels = labels.long()
         loss = criterion(outputs, labels)
+        
+        # Add L1 regularization
+        l1_lambda = 0.0001
+        l1_norm = sum(p.abs().sum() for p in model.parameters())
+        loss = loss + l1_lambda * l1_norm
+        
         loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        
         optimizer.step()
         
         total_loss += loss.item()
@@ -166,14 +204,20 @@ def train_one_epoch():
     return total_loss / len(dataloader), accuracy, mae
 
 # Training with early stopping
-max_epochs = 200
-early_stopping = EarlyStopping(patience=10, min_delta=0.001)
+max_epochs = 300  # More epochs
+early_stopping = EarlyStopping(patience=15, min_delta=0.0005)  # More patience
+warmup_epochs = 10  # Longer warmup
+warmup_lr_multiplier = 0.01  # Gentler warmup
 visualizer = TrainingVisualizer()
 
 best_mae = float('inf')
 epoch = 0
 
 print("\nStarting training...")
+warmup_epochs = 5
+warmup_lr_multiplier = 0.1
+initial_lr = optimizer.param_groups[0]['lr']
+
 while epoch < max_epochs and not early_stopping.early_stop:
     # Train one epoch
     avg_loss, accuracy, mae = train_one_epoch()
@@ -212,6 +256,12 @@ while epoch < max_epochs and not early_stopping.early_stop:
             }
         }, 'best_model.pth')
         print(f"New best model saved! MAE: {mae:.2f}")
+    
+    # Linear warmup
+    if epoch < warmup_epochs:
+        lr = initial_lr * warmup_lr_multiplier + (initial_lr * (1 - warmup_lr_multiplier)) * (epoch / warmup_epochs)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
     
     epoch += 1
     

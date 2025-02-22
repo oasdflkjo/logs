@@ -10,35 +10,56 @@ import torch_directml
 from pointnet_modified import PointNet
 from dataset import PointCloudDataset
 import json
+from collections import defaultdict
 
 class PointCloudViewer:
     def __init__(self, output_dir="C:\\output"):
         self.output_dir = output_dir
-        self.pointcloud_files = self.get_pointcloud_files()
-        self.current_index = 0
         
         # Setup model and device
         self.device = torch_directml.device()
         self.model = self.load_model()
         self.dataset = PointCloudDataset(output_dir, device=self.device)
         
-        if not self.pointcloud_files:
+        # Organize files by log count and sort them
+        self.files_by_log_count = defaultdict(list)
+        self.max_files_per_count = 0  # Track max files for any log count
+        
+        # Load and organize all files
+        for file in glob.glob(os.path.join(output_dir, "*_pointcloud.npy")):
+            timetag = '_'.join(file.split('_')[:4])
+            metadata_file = os.path.join(output_dir, f"{timetag}_metadata.json")
+            
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                num_logs = metadata.get('num_logs', 0)
+                self.files_by_log_count[num_logs].append(file)
+        
+        # Sort files within each log count
+        for log_count in self.files_by_log_count:
+            self.files_by_log_count[log_count].sort()
+            self.max_files_per_count = max(self.max_files_per_count, 
+                                         len(self.files_by_log_count[log_count]))
+        
+        # Initialize position
+        self.current_log_count = 1
+        self.file_position = 0  # Position in the sequence
+        
+        if not self.files_by_log_count:
             raise Exception(f"No point cloud files found in {output_dir}")
         
         # Create figure with adjusted proportions
-        self.fig = plt.figure(figsize=(20, 8))  # Reduced width from 24 to 20
+        self.fig = plt.figure(figsize=(20, 8))
         
         # Create gridspec with minimal spacing
         gs = self.fig.add_gridspec(1, 2, 
                                   width_ratios=[1.2, 1], 
-                                  wspace=0.05,  # Reduced space between subplots
-                                  left=0.05,    # Less margin on left
-                                  right=0.95)   # Less margin on right
+                                  wspace=0.05,
+                                  left=0.05,
+                                  right=0.95)
         
-        # Point cloud subplot
         self.ax_pc = self.fig.add_subplot(gs[0], projection='3d')
-        
-        # Render image subplot
         self.ax_img = self.fig.add_subplot(gs[1])
         
         # Connect keyboard events
@@ -46,28 +67,6 @@ class PointCloudViewer:
         
         # Initial plot
         self.plot_current_data()
-        
-    def get_pointcloud_files(self):
-        """Get sorted list of point cloud files"""
-        files = glob.glob(os.path.join(self.output_dir, "*_pointcloud.npy"))
-        return sorted(files)
-    
-    def get_render_path(self, pointcloud_path):
-        """Get corresponding render path for a pointcloud file"""
-        base_path = pointcloud_path.replace('_pointcloud.npy', '_render.png')
-        return base_path
-    
-    def print_pointcloud_info(self):
-        """Print information about current point cloud"""
-        points = np.load(self.pointcloud_files[self.current_index])
-        points = points.reshape(-1, 3)  # Ensure correct shape
-        print(f"\nPoint Cloud File: {os.path.basename(self.pointcloud_files[self.current_index])}")
-        print(f"Number of points: {len(points)}")
-        print(f"Shape: {points.shape}")
-        print("\nBounding Box:")
-        print(f"X: min={points[:, 0].min():.2f}, max={points[:, 0].max():.2f}")
-        print(f"Y: min={points[:, 1].min():.2f}, max={points[:, 1].max():.2f}")
-        print(f"Z: min={points[:, 2].min():.2f}, max={points[:, 2].max():.2f}")
     
     def load_model(self):
         """Load the trained model"""
@@ -78,151 +77,71 @@ class PointCloudViewer:
         print(f"Loaded model with accuracy: {checkpoint['accuracy']:.2f}%")
         return model
 
-    def predict_logs(self, point_cloud):
-        """Predict number of logs in point cloud"""
-        # Preprocess point cloud same way as training
-        point_cloud = self.dataset.filter_ground_points(point_cloud)
-        point_cloud = self.dataset.normalize_point_cloud(point_cloud)
-        point_cloud = self.dataset.sample_points(point_cloud, self.dataset.num_points)
+    def get_prediction(self, points):
+        """Get model prediction for point cloud"""
+        # Preprocess point cloud same as training
+        points = points.reshape(-1, 3)
+        mask = points[:, 2] != 0
+        points = points[mask]
         
-        # Convert to tensor and correct shape
-        point_cloud = torch.FloatTensor(point_cloud).to(self.device)
-        point_cloud = point_cloud.transpose(0, 1).unsqueeze(0)  # Add batch dimension
+        # Center points
+        center = np.mean(points, axis=0)
+        points = points - center
+        
+        # Sample points if needed
+        if points.shape[0] > self.dataset.num_points:
+            idx = np.random.choice(points.shape[0], self.dataset.num_points, replace=False)
+            points = points[idx]
+        
+        # Convert to tensor
+        points = torch.FloatTensor(points).to(self.device)
+        points = points.transpose(0, 1).unsqueeze(0)  # Add batch dimension
         
         # Get prediction
         with torch.no_grad():
-            output = self.model(point_cloud)
+            output = self.model(points)
             pred = output.argmax(1).item()
             probs = torch.nn.functional.softmax(output, dim=1)[0]
             confidence = probs[pred].item() * 100
+            
+            # Get top 3 predictions
+            top3_values, top3_indices = torch.topk(probs, 3)
+            top3_preds = [(idx.item(), val.item() * 100) for idx, val in zip(top3_indices, top3_values)]
         
-        return pred, confidence
+        return pred, confidence, top3_preds
 
-    def plot_current_data(self):
-        """Plot point cloud, render, and prediction"""
-        self.ax_pc.clear()
-        self.ax_img.clear()
-        
-        current_file = self.pointcloud_files[self.current_index]
-        render_file = self.get_render_path(current_file)
-        
-        # Load and plot point cloud
-        points = np.load(current_file)
-        points = points.reshape(-1, 3)
-        
-        # Get prediction
-        num_logs_pred, confidence = self.predict_logs(points)
-        
-        # Load actual number of logs
-        metadata_file = current_file.replace('_pointcloud.npy', '_metadata.json')
-        with open(metadata_file, 'r') as f:
-            metadata = json.load(f)
-        actual_logs = metadata.get('num_logs', 0)
-        
-        # Calculate height-based colors and transparency
-        z_values = points[:, 2]  # Get z coordinates
-        min_z = np.percentile(z_values, 5)
-        max_z = np.percentile(z_values, 95)
-        
-        # Normalize z values for coloring
-        normalized_z = (z_values - min_z) / (max_z - min_z)
-        normalized_z = np.clip(normalized_z, 0, 1)
-        
-        # Calculate alpha (transparency) based on z value
-        # Very transparent near z=0, gradually more opaque as height increases
-        ground_threshold = 0.1  # Points below this height are considered ground level
-        alphas = np.clip((np.abs(z_values) - ground_threshold) / 0.5, 0, 1) * 0.8 + 0.1
-        
-        # Create color array with varying transparency
-        colors = np.zeros((len(points), 4))  # RGBA array
-        colors[:, 2] = normalized_z  # Blue component varies with height
-        colors[:, 1] = normalized_z * 0.5  # Some green for mid-heights
-        colors[:, 0] = normalized_z * 0.2  # A bit of red for highest points
-        colors[:, 3] = alphas  # Alpha channel
-        
-        # Plot points
-        scatter = self.ax_pc.scatter(
-            points[:, 0], points[:, 1], points[:, 2],
-            c=colors,
-            marker='.',
-            s=2,
-        )
-        
-        # Set view to match render camera perspective
-        self.ax_pc.view_init(elev=5, azim=315)
-        
-        # Set equal aspect ratio and view
-        self.ax_pc.set_box_aspect([1, 1, 0.5])
-        
-        # Set axis labels
-        self.ax_pc.set_xlabel('X')
-        self.ax_pc.set_ylabel('Y')
-        self.ax_pc.set_zlabel('Z')
-        
-        # Auto-scale axes to data with adjusted zoom
-        max_range = np.array([
-            points[:, 0].max() - points[:, 0].min(),
-            points[:, 1].max() - points[:, 1].min(),
-            points[:, 2].max() - points[:, 2].min()
-        ]).max() / 2.0
-        
-        mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
-        mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
-        mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
-        
-        # Zoom factor
-        zoom = 0.4
-        
-        self.ax_pc.set_xlim(mid_x - max_range * zoom, mid_x + max_range * zoom)
-        self.ax_pc.set_ylim(mid_y - max_range * zoom, mid_y + max_range * zoom)
-        self.ax_pc.set_zlim(mid_z - max_range/2 * zoom, mid_z + max_range/2 * zoom)
-        
-        # Plot render image if it exists
-        if os.path.exists(render_file):
-            img = imread(render_file)
-            self.ax_img.imshow(img)
-            self.ax_img.set_title("Rendered View")
-            self.ax_img.axis('off')
-        else:
-            self.ax_img.text(0.5, 0.5, 'No render found', 
-                           ha='center', va='center')
-            self.ax_img.set_title("Missing Render")
-        
-        # Print info
-        self.print_pointcloud_info()
-        
-        # Remove old titles
-        self.ax_pc.set_title("")
-        self.ax_img.set_title("")
-        
-        # Add prediction information to title
-        self.fig.suptitle(f"{os.path.basename(current_file)}\n"
-                         f"Predicted: {num_logs_pred} logs (Confidence: {confidence:.1f}%)\n"
-                         f"Actual: {actual_logs} logs", 
-                         fontsize=14, y=0.98)
-        
-        # Update display
-        plt.tight_layout(rect=[0.05, 0.02, 0.95, 0.92])
-        self.fig.canvas.draw_idle()
+    def get_current_file(self):
+        """Get current file based on position"""
+        files = self.files_by_log_count[self.current_log_count]
+        # Use modulo to wrap around if we reach the end of files for this log count
+        return files[self.file_position % len(files)]
     
+    def next_file(self):
+        """Move to next file, incrementing log count when needed"""
+        self.file_position += 1
+        if self.file_position >= self.max_files_per_count:
+            # Move to next log count
+            self.current_log_count = (self.current_log_count % 20) + 1
+            self.file_position = 0
+    
+    def prev_file(self):
+        """Move to previous file, decrementing log count when needed"""
+        self.file_position -= 1
+        if self.file_position < 0:
+            # Move to previous log count
+            self.current_log_count = ((self.current_log_count - 2) % 20) + 1
+            self.file_position = self.max_files_per_count - 1
+
     def on_key_press(self, event):
         """Handle keyboard events"""
         if event.key == 'right':
-            self.current_index = (self.current_index + 1) % len(self.pointcloud_files)
-            self.plot_current_data()  # This will clear and redraw everything
+            self.next_file()
+            self.plot_current_data()
         elif event.key == 'left':
-            self.current_index = (self.current_index - 1) % len(self.pointcloud_files)
-            self.plot_current_data()  # This will clear and redraw everything
+            self.prev_file()
+            self.plot_current_data()
         elif event.key == 'r':  # Reset view
-            self.ax_pc.view_init(elev=5, azim=315)  # Match our current shallow angle
-            self.fig.canvas.draw_idle()  # Just update the view, don't redraw everything
-        elif event.key == 'up':
-            current_elev = self.ax_pc.elev
-            self.ax_pc.view_init(elev=current_elev + 5, azim=self.ax_pc.azim)
-            self.fig.canvas.draw_idle()
-        elif event.key == 'down':
-            current_elev = self.ax_pc.elev
-            self.ax_pc.view_init(elev=current_elev - 5, azim=self.ax_pc.azim)
+            self.ax_pc.view_init(elev=5, azim=315)
             self.fig.canvas.draw_idle()
         elif event.key == '+' or event.key == '=':  # Zoom in
             current_xlim = self.ax_pc.get_xlim()
@@ -242,17 +161,106 @@ class PointCloudViewer:
             self.fig.canvas.draw_idle()
         elif event.key == 'q':
             plt.close(self.fig)
-    
+
     def show(self):
         """Display usage instructions and show the plot"""
         print("\nUsage:")
-        print("- Right Arrow: Next point cloud")
-        print("- Left Arrow: Previous point cloud")
-        print("- Up/Down Arrow: Adjust view angle")
-        print("- +/-: Zoom in/out")
+        print("- Right Arrow: Next log count")
+        print("- Left Arrow: Previous log count")
         print("- R: Reset view to match render")
+        print("- +/-: Zoom in/out")
         print("- Q: Quit")
         plt.show()
+
+    def plot_current_data(self):
+        """Plot point cloud and render"""
+        self.ax_pc.clear()
+        self.ax_img.clear()
+        
+        current_file = self.get_current_file()
+        render_file = current_file.replace('_pointcloud.npy', '_render.png')
+        
+        # Load and plot point cloud
+        points = np.load(current_file)
+        
+        # Get model prediction
+        pred, confidence, top3_preds = self.get_prediction(points)
+        
+        # Calculate height-based colors and transparency
+        z_values = points[:, 2]
+        min_z = np.percentile(z_values, 5)
+        max_z = np.percentile(z_values, 95)
+        
+        # Normalize z values for coloring
+        normalized_z = (z_values - min_z) / (max_z - min_z)
+        normalized_z = np.clip(normalized_z, 0, 1)
+        
+        # Calculate alpha based on z value
+        ground_threshold = 0.1
+        alphas = np.clip((np.abs(z_values) - ground_threshold) / 0.5, 0, 1) * 0.8 + 0.1
+        
+        # Create color array with varying transparency
+        colors = np.zeros((len(points), 4))
+        colors[:, 2] = normalized_z  # Blue component
+        colors[:, 1] = normalized_z * 0.5  # Green component
+        colors[:, 0] = normalized_z * 0.2  # Red component
+        colors[:, 3] = alphas  # Alpha channel
+        
+        # Plot points
+        scatter = self.ax_pc.scatter(
+            points[:, 0], points[:, 1], points[:, 2],
+            c=colors,
+            marker='.',
+            s=2,
+        )
+        
+        # Set view angle
+        self.ax_pc.view_init(elev=5, azim=315)
+        
+        # Set equal aspect ratio
+        self.ax_pc.set_box_aspect([1, 1, 0.5])
+        
+        # Set axis labels
+        self.ax_pc.set_xlabel('X')
+        self.ax_pc.set_ylabel('Y')
+        self.ax_pc.set_zlabel('Z')
+        
+        # Auto-scale axes
+        max_range = np.array([
+            points[:, 0].max() - points[:, 0].min(),
+            points[:, 1].max() - points[:, 1].min(),
+            points[:, 2].max() - points[:, 2].min()
+        ]).max() / 2.0
+        
+        mid_x = (points[:, 0].max() + points[:, 0].min()) * 0.5
+        mid_y = (points[:, 1].max() + points[:, 1].min()) * 0.5
+        mid_z = (points[:, 2].max() + points[:, 2].min()) * 0.5
+        
+        zoom = 0.4
+        self.ax_pc.set_xlim(mid_x - max_range * zoom, mid_x + max_range * zoom)
+        self.ax_pc.set_ylim(mid_y - max_range * zoom, mid_y + max_range * zoom)
+        self.ax_pc.set_zlim(mid_z - max_range/2 * zoom, mid_z + max_range/2 * zoom)
+        
+        # Plot render image
+        if os.path.exists(render_file):
+            img = imread(render_file)
+            self.ax_img.imshow(img)
+            self.ax_img.axis('off')
+        else:
+            self.ax_img.text(0.5, 0.5, 'No render found', 
+                            ha='center', va='center')
+        
+        # Update title with prediction info
+        total_files = len(self.files_by_log_count[self.current_log_count])
+        title = f"Actual: {self.current_log_count} logs | Predicted: {pred} logs (Confidence: {confidence:.1f}%)\n"
+        title += f"Top 3 predictions: "
+        title += ", ".join([f"{p} logs ({c:.1f}%)" for p, c in top3_preds])
+        title += f"\nFile {self.file_position + 1}/{total_files}: {os.path.basename(current_file)}"
+        
+        self.fig.suptitle(title, fontsize=12, y=0.98)
+        
+        plt.tight_layout(rect=[0.05, 0.02, 0.95, 0.92])
+        self.fig.canvas.draw_idle()
 
 def main():
     try:
