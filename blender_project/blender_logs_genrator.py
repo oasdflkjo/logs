@@ -6,9 +6,13 @@ from datetime import datetime
 import traceback
 import sys
 import os
+import importlib  # Add this import
 
 # Add the project directory to Python path to find virtual_lidar
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+import virtual_lidar
+# Force reload the module to get the latest changes
+importlib.reload(virtual_lidar)
 from virtual_lidar import capture_final_state, VirtualLidarScanner
 
 # Configuration
@@ -31,6 +35,8 @@ BATCH_SIZE = 3           # How many logs to spawn at once
 PHYSICS_TIME_SCALE = 1.0    # Normal physics speed
 PHYSICS_STEPS = 5           # Fewer steps between spawns
 PHYSICS_ITERATIONS = 5      # Fewer solver iterations
+
+print(os.getcwd())
 
 def show_message(message):
     """Simple message display"""
@@ -321,9 +327,9 @@ def main():
     # Capture the final state
     show_message("\nCapturing final state...")
     try:
-        scanner = VirtualLidarScanner()
+        scanner = VirtualLidarScanner(output_dir="C:\\output", message_callback=show_message)
         scanner.metadata_seed = seed
-        capture_final_state(scanner)
+        capture_final_state(scanner, message_callback=show_message)
         show_message("Capture complete")
     except Exception as e:
         show_message(f"Capture error: {str(e)}")
