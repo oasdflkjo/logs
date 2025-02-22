@@ -17,9 +17,11 @@ from virtual_lidar import capture_final_state, VirtualLidarScanner
 
 # Configuration
 RANDOM_SEED = None  # Set to None for random, or an integer for reproducible results
-NUM_LOGS = 50  # Number of logs to spawn
-GROUND_SIZE = 50  # Larger ground plane (50 meters)
-SIMULATION_FRAMES = 250  # Longer single simulation
+MIN_LOGS = 1          # Start with 1 log
+MAX_LOGS = 20         # Up to 20 logs
+RUNS_PER_COUNT = 50   # 50 simulations per log count
+GROUND_SIZE = 50      # Larger ground plane (50 meters)
+SIMULATION_FRAMES = 250  # Simulation length
 LOG_SIZE = {
     'radius': 0.15,  # 30cm diameter
     'depth': 4.0     # 4 meters length
@@ -291,58 +293,81 @@ def run_physics_simulation(frame_count):
     show_message("Physics simulation complete")
 
 def main():
-    # Set random seed at the start
-    seed = set_random_seed()
+    total_simulations = (MAX_LOGS - MIN_LOGS + 1) * RUNS_PER_COUNT
+    current_simulation = 0
     
-    clear_scene()
-    setup_scene()
-    create_ground()
+    show_message(f"\nStarting data generation:")
+    show_message(f"- Generating {RUNS_PER_COUNT} simulations for each log count from {MIN_LOGS} to {MAX_LOGS}")
+    show_message(f"- Total simulations to run: {total_simulations}\n")
     
-    # Store seed in scene for frame handler to access
-    bpy.context.scene['random_seed'] = seed
-    
-    show_message(f"Spawning {NUM_LOGS} logs gradually (seed: {seed})...")
-    
-    # Spawn logs in small batches
-    logs_spawned = 0
-    
-    while logs_spawned < NUM_LOGS:
-        # Spawn a small batch
-        logs_to_spawn = min(BATCH_SIZE, NUM_LOGS - logs_spawned)
+    # Loop through different log counts
+    for num_logs in range(MIN_LOGS, MAX_LOGS + 1):
+        show_message(f"\n=== Starting simulations with {num_logs} logs ===")
         
-        # Spawn batch
-        for i in range(logs_to_spawn):
-            spawn_log(logs_spawned + i)
-        
-        logs_spawned += logs_to_spawn
-        
-        # Run physics for a few frames to let logs settle
-        for _ in range(PHYSICS_STEPS):
-            bpy.context.scene.frame_set(bpy.context.scene.frame_current + 1)
-            bpy.context.view_layer.update()
-        
-        show_message(f"Spawned {logs_spawned}/{NUM_LOGS} logs...")
-    
-    # Run the physics simulation
-    show_message("\nRunning physics simulation...")
-    run_physics_simulation(SIMULATION_FRAMES)
-    
-    # Capture the final state
-    show_message("\nCapturing final state...")
-    try:
-        scanner = VirtualLidarScanner(output_dir="C:\\output", message_callback=show_message)
-        scanner.metadata_seed = seed
-        capture_final_state(scanner, message_callback=show_message)
-        show_message("Capture complete")
-    except Exception as e:
-        show_message(f"Capture error: {str(e)}")
-        show_message(traceback.format_exc())
+        # Run multiple simulations for this log count
+        for run in range(RUNS_PER_COUNT):
+            current_simulation += 1
+            show_message(f"\nSimulation {current_simulation}/{total_simulations}")
+            show_message(f"Running simulation {run + 1}/{RUNS_PER_COUNT} with {num_logs} logs")
+            
+            # Set random seed for this run
+            seed = set_random_seed()
+            
+            # Clear and setup scene
+            clear_scene()
+            setup_scene()
+            create_ground()
+            
+            # Store configuration in scene
+            scene = bpy.context.scene
+            scene['log_count'] = num_logs
+            scene['run_number'] = run + 1
+            scene['random_seed'] = seed
+            
+            # Spawn logs gradually
+            logs_spawned = 0
+            while logs_spawned < num_logs:
+                # Spawn a small batch
+                logs_to_spawn = min(BATCH_SIZE, num_logs - logs_spawned)
+                
+                # Spawn batch
+                for i in range(logs_to_spawn):
+                    spawn_log(logs_spawned + i)
+                
+                logs_spawned += logs_to_spawn
+                
+                # Run physics for a few frames to let logs settle
+                for _ in range(PHYSICS_STEPS):
+                    scene.frame_set(scene.frame_current + 1)
+                    bpy.context.view_layer.update()
+            
+            # Run physics simulation
+            run_physics_simulation(SIMULATION_FRAMES)
+            
+            # Capture the final state
+            try:
+                scanner = VirtualLidarScanner(
+                    output_dir="C:\\output", 
+                    message_callback=show_message
+                )
+                scanner.metadata_seed = seed
+                capture_final_state(scanner, message_callback=show_message)
+                
+                show_message(f"Completed simulation {current_simulation}/{total_simulations}")
+                show_message(f"Progress: {(current_simulation/total_simulations)*100:.1f}%")
+                
+            except Exception as e:
+                show_message(f"Error in simulation {current_simulation}: {str(e)}")
+                show_message(traceback.format_exc())
+                continue  # Continue with next simulation even if this one fails
 
-    show_message(f"\nSimulation complete. To recreate this exact arrangement, use seed: {seed}")
+    show_message("\nData generation complete!")
+    show_message(f"Generated {total_simulations} simulations")
+    show_message(f"Output directory: C:\\output")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        show_message(f"Error occurred: {str(e)}")
+        show_message(f"Fatal error: {str(e)}")
         show_message(traceback.format_exc())
