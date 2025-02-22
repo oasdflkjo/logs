@@ -18,8 +18,8 @@ class VirtualLidarScanner:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
-        # Reduced LiDAR parameters
-        self.resolution = 64  # Reduced from 256
+        # LiDAR parameters
+        self.resolution = 128  # Increased for better detail
         self.vertical_fov = 45
         self.max_distance = 100
         self.batch_size = 1000  # Process rays in batches
@@ -31,6 +31,9 @@ class VirtualLidarScanner:
         if not camera:
             raise Exception("No camera found in scene")
             
+        # Make sure we're looking at the current state
+        bpy.context.view_layer.update()
+        
         # Create unique ID for this capture
         capture_id = f"capture_{self.timestamp}"
         
@@ -56,7 +59,7 @@ class VirtualLidarScanner:
         except Exception as e:
             error_msg = f"Error in capture_scene: {str(e)}\n{traceback.format_exc()}"
             self.show_message(error_msg)
-            raise  # Re-raise the exception to be caught by capture_final_state
+            raise
         
     def collect_metadata(self):
         """Collect basic metadata about the simulation with type checking"""
@@ -81,13 +84,23 @@ class VirtualLidarScanner:
         """Generate point cloud data from virtual LiDAR scan with batching"""
         points = []
         
-        # Calculate scan parameters
-        vertical_step = self.vertical_fov / self.resolution
-        horizontal_step = 360.0 / self.resolution
+        # Get camera parameters
+        cam_data = camera.data
+        # Calculate camera's field of view
+        horizontal_fov = math.degrees(cam_data.angle_x)
+        vertical_fov = math.degrees(cam_data.angle_y)
         
-        # Cast rays from camera position
+        # Calculate scan parameters
+        vertical_step = vertical_fov / self.resolution
+        horizontal_step = horizontal_fov / self.resolution
+        
+        # Get camera orientation
+        cam_matrix = camera.matrix_world
+        cam_rotation = cam_matrix.to_quaternion()
         origin = camera.location
+        
         self.show_message(f"Starting point cloud generation from camera at {origin}")
+        self.show_message(f"Camera FOV - Horizontal: {horizontal_fov:.1f}°, Vertical: {vertical_fov:.1f}°")
         
         try:
             total_points = self.resolution * self.resolution
@@ -95,17 +108,22 @@ class VirtualLidarScanner:
             ray_batch = []
             
             for v in range(self.resolution):
-                vertical_angle = -self.vertical_fov/2 + v * vertical_step
+                # Calculate vertical angle from camera's perspective
+                vertical_angle = (vertical_fov/2) - (v * vertical_step)
                 
                 for h in range(self.resolution):
-                    horizontal_angle = h * horizontal_step
+                    # Calculate horizontal angle from camera's perspective
+                    horizontal_angle = (-horizontal_fov/2) + (h * horizontal_step)
                     
-                    # Calculate ray direction
+                    # Create direction vector in camera space
                     direction = Vector((
-                        math.cos(math.radians(horizontal_angle)) * math.cos(math.radians(vertical_angle)),
-                        math.sin(math.radians(horizontal_angle)) * math.cos(math.radians(vertical_angle)),
-                        math.sin(math.radians(vertical_angle))
-                    ))
+                        math.tan(math.radians(horizontal_angle)),
+                        math.tan(math.radians(vertical_angle)),
+                        -1.0  # Forward direction in camera space
+                    )).normalized()
+                    
+                    # Transform direction to world space
+                    direction.rotate(cam_rotation)
                     
                     ray_batch.append((origin, direction))
                     

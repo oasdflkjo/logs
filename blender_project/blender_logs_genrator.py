@@ -276,14 +276,17 @@ def run_physics_simulation(frame_count):
     # Reset to start frame
     scene.frame_current = 1
     
-    # Free bake if it exists
-    bpy.ops.ptcache.free_bake_all()
-    
-    # Run the physics simulation without animation
+    # Run the physics simulation frame by frame
+    show_message("Running physics simulation...")
     for frame in range(1, frame_count + 1):
         scene.frame_set(frame)
         if frame % 50 == 0:  # Progress update every 50 frames
             show_message(f"Simulating physics: frame {frame}/{frame_count}")
+    
+    # Ensure we're on the last frame
+    scene.frame_set(frame_count)
+    # Force a final update
+    bpy.context.view_layer.update()
     
     show_message("Physics simulation complete")
 
@@ -320,7 +323,7 @@ def main():
         
         show_message(f"Spawned {logs_spawned}/{NUM_LOGS} logs...")
     
-    # Run the full physics simulation
+    # Run the physics simulation
     show_message("\nRunning physics simulation...")
     run_physics_simulation(SIMULATION_FRAMES)
     
