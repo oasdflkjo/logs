@@ -3,71 +3,66 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PointNet(nn.Module):
-    def __init__(self, num_classes=21, feature_transform=False, global_feat=True):
+    def __init__(self, num_classes=21):
         super(PointNet, self).__init__()
-        self.num_classes = num_classes
-        self.feature_transform = feature_transform
-        self.global_feat = global_feat
         
-        # Feature extraction
-        self.conv1 = nn.Conv1d(3, 64, 1)
-        self.in1 = nn.InstanceNorm1d(64)
+        # Initial feature extraction
+        self.input_transform = nn.Sequential(
+            nn.Conv1d(3, 32, 1),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Conv1d(32, 32, 1),
+            nn.BatchNorm1d(32),
+            nn.ReLU()
+        )
         
-        self.conv2 = nn.Conv1d(64, 128, 1)
-        self.in2 = nn.InstanceNorm1d(128)
+        # Local feature aggregation
+        self.local_features = nn.Sequential(
+            nn.Conv1d(32, 64, 1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, 1),
+            nn.BatchNorm1d(128),
+            nn.ReLU()
+        )
         
-        self.conv3 = nn.Conv1d(128, 256, 1)
-        self.in3 = nn.InstanceNorm1d(256)
+        # Global feature extraction
+        self.global_features = nn.Sequential(
+            nn.Conv1d(128, 256, 1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Conv1d(256, 512, 1),
+            nn.BatchNorm1d(512),
+            nn.ReLU()
+        )
         
-        # Global feature learning
-        self.conv4 = nn.Conv1d(256, 512, 1)
-        self.in4 = nn.InstanceNorm1d(512)
+        # Counting-specific layers
+        self.count_features = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.Dropout(0.2),
+            nn.Linear(128, num_classes)
+        )
         
-        # Fully connected layers
-        self.fc1 = nn.Linear(512, 256)
-        self.in5 = nn.InstanceNorm1d(256)
-        self.dropout1 = nn.Dropout(p=0.3)
-        
-        self.fc2 = nn.Linear(256, 128)
-        self.in6 = nn.InstanceNorm1d(128)
-        self.dropout2 = nn.Dropout(p=0.3)
-        
-        self.fc3 = nn.Linear(128, num_classes)
-
-        if self.feature_transform:
-            self.fstn = STNkd(k=64)
-
     def forward(self, x):
-        # Feature extraction
-        x = F.relu(self.in1(self.conv1(x)))
+        # Initial transform
+        x = self.input_transform(x)
         
-        if self.feature_transform:
-            trans_feat = self.fstn(x)
-            x = x.transpose(2, 1)
-            x = torch.bmm(x, trans_feat)
-            x = x.transpose(2, 1)
+        # Extract local features
+        local_feat = self.local_features(x)
         
-        x = F.relu(self.in2(self.conv2(x)))
-        x = F.relu(self.in3(self.conv3(x)))
-        
-        # Global feature learning
-        x = F.relu(self.in4(self.conv4(x)))
+        # Extract global features
+        x = self.global_features(local_feat)
         
         # Global max pooling
         x = torch.max(x, 2)[0]
         
-        if not self.global_feat:
-            return x
-        
-        # Fully connected layers
-        x = x.view(-1, 512)
-        x = F.relu(self.fc1(x))
-        x = self.dropout1(x)
-        
-        x = F.relu(self.fc2(x))
-        x = self.dropout2(x)
-        
-        x = self.fc3(x)
+        # Predict count
+        x = self.count_features(x)
         
         return x
 
