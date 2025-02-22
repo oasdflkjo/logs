@@ -3,10 +3,17 @@ import random
 import math
 import time
 from datetime import datetime
+import traceback
+import sys
+import os
+
+# Add the project directory to Python path to find virtual_lidar
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from virtual_lidar import capture_final_state, VirtualLidarScanner
 
 # Configuration
 RANDOM_SEED = None  # Set to None for random, or an integer for reproducible results
-NUM_LOGS = 100  # Number of logs to spawn
+NUM_LOGS = 50  # Number of logs to spawn
 GROUND_SIZE = 50  # Larger ground plane (50 meters)
 SIMULATION_FRAMES = 250  # Longer single simulation
 LOG_SIZE = {
@@ -16,7 +23,7 @@ LOG_SIZE = {
 
 # Spawn configuration
 SPAWN_HEIGHT_START = 2.0  # Start spawning from 2 meters up
-SPAWN_AREA_RADIUS = 0.8   # Tighter radius for vertical stacking
+SPAWN_AREA_RADIUS = 0.6   # Reduced from 0.8 to keep logs more centered
 VERTICAL_SPACING = 0.4    # Space between logs in vertical direction
 BATCH_SIZE = 3           # How many logs to spawn at once
 
@@ -25,15 +32,19 @@ PHYSICS_TIME_SCALE = 2.0    # Speed up physics (2x faster)
 PHYSICS_STEPS = 10          # Frames to simulate between spawns
 PHYSICS_ITERATIONS = 10     # Solver iterations (lower = faster but less accurate)
 
+def show_message(message):
+    """Simple message display"""
+    print(message, flush=True)  # Force flush the print buffer
+
 def set_random_seed():
     if RANDOM_SEED is None:
-        # Get current timestamp for a unique seed
-        seed = int(datetime.now().timestamp() * 1000)
+        # Get current timestamp but use a smaller number
+        seed = int((datetime.now().timestamp() % 10000) * 1000)  # This will keep the number manageable
     else:
         seed = RANDOM_SEED
     
     random.seed(seed)
-    print(f"Using random seed: {seed}")
+    show_message(f"Using random seed: {seed}")
     return seed
 
 def clear_scene():
@@ -41,17 +52,50 @@ def clear_scene():
     bpy.ops.object.delete()
 
 def create_ground():
+    # Create initial plane
     bpy.ops.mesh.primitive_plane_add(size=GROUND_SIZE, location=(0, 0, 0))
     ground = bpy.context.object
     ground.name = "Ground"
     
+    # Add more geometry to allow for smooth deformation
+    bpy.ops.object.modifier_add(type='SUBSURF')
+    ground.modifiers["Subdivision"].levels = 3  # Reduced from 5
+    ground.modifiers["Subdivision"].render_levels = 3
+    
+    # Add displacement modifier
+    displace = ground.modifiers.new(name="Bowl_Shape", type='DISPLACE')
+    
+    # Create new texture for displacement
+    tex = bpy.data.textures.new('Bowl_Texture', type='BLEND')
+    tex.use_color_ramp = True
+    tex.color_ramp.elements[0].position = 0.0
+    tex.color_ramp.elements[1].position = 1.0
+    tex.color_ramp.elements[0].color = (1, 1, 1, 1)  # Center (max displacement)
+    tex.color_ramp.elements[1].color = (0, 0, 0, 1)  # Edge (no displacement)
+    
+    # Configure texture for radial gradient
+    tex.progression = 'SPHERICAL'
+    
+    # Apply texture to displacement modifier
+    displace.texture = tex
+    displace.strength = 0.2  # Much smaller value for subtle effect
+    displace.direction = 'Z'  # Displace upward
+    displace.mid_level = 1.0  # Changed to 1.0 to invert the effect
+    
     # Add rigid body physics
     bpy.ops.rigidbody.object_add()
     ground.rigid_body.type = 'PASSIVE'
-    ground.rigid_body.friction = 1.0  # Maximum friction
-    ground.rigid_body.collision_shape = 'BOX'  # More stable collision
+    ground.rigid_body.friction = 1.0
+    ground.rigid_body.collision_shape = 'MESH'
     ground.rigid_body.use_margin = True
     ground.rigid_body.collision_margin = 0.001
+    
+    # Apply modifiers to make physics work correctly
+    bpy.context.view_layer.objects.active = ground
+    bpy.ops.object.modifier_apply(modifier="Subdivision")
+    bpy.ops.object.modifier_apply(modifier="Bowl_Shape")
+    
+    show_message("Created subtle bowl-shaped ground")
 
 def spawn_log(index):
     """Spawn a single log with good spacing"""
@@ -93,6 +137,34 @@ def spawn_log(index):
     log.rigid_body.angular_damping = 0.6
     
     return log
+
+class AutoCaptureOperator(bpy.types.Operator):
+    """Operator that captures scene state at end of animation"""
+    bl_idname = "scene.auto_capture"
+    bl_label = "Auto Capture"
+    
+    _timer = None
+    
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            if context.scene.frame_current == context.scene.frame_end:
+                show_message("\nEnd of animation loop - capturing state...")
+                scanner = VirtualLidarScanner()
+                scanner.metadata_seed = context.scene.get('random_seed', None)
+                capture_final_state(scanner)
+        
+        return {'PASS_THROUGH'}
+    
+    def execute(self, context):
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.1, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+    
+    def cancel(self, context):
+        if self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+        return {'CANCELLED'}
 
 def setup_scene():
     # Set up the physics scene
@@ -145,6 +217,12 @@ def setup_scene():
             area.spaces[0].region_3d.view_perspective = 'CAMERA'
             break
 
+    # Register and start the auto-capture operator
+    bpy.utils.register_class(AutoCaptureOperator)
+    bpy.ops.scene.auto_capture()
+    
+    show_message("Added automatic capture at end of each loop")
+
 def run_physics_simulation(frame_count):
     scene = bpy.context.scene
     
@@ -157,7 +235,7 @@ def run_physics_simulation(frame_count):
     # Let the physics initialize
     bpy.context.view_layer.update()
     
-    print("Physics ready - press Alt+A to play animation")
+    show_message("Physics ready - press Alt+A to play animation")
 
 def main():
     # Set random seed at the start
@@ -167,7 +245,10 @@ def main():
     setup_scene()
     create_ground()
     
-    print(f"Spawning {NUM_LOGS} logs gradually (seed: {seed})...")
+    # Store seed in scene for frame handler to access
+    bpy.context.scene['random_seed'] = seed
+    
+    show_message(f"Spawning {NUM_LOGS} logs gradually (seed: {seed})...")
     
     # Spawn logs in small batches
     logs_spawned = 0
@@ -187,13 +268,23 @@ def main():
             bpy.context.scene.frame_set(bpy.context.scene.frame_current + 1)
             bpy.context.view_layer.update()
         
-        print(f"Spawned {logs_spawned}/{NUM_LOGS} logs...")
+        show_message(f"Spawned {logs_spawned}/{NUM_LOGS} logs...")
     
-    print("Scene setup complete. You can now:")
-    print("1. Press Alt+A to play/restart the animation")
-    print("2. Press Spacebar to pause")
-    print("3. Use the timeline to scrub through the animation")
-    print(f"4. To recreate this exact arrangement, use seed: {seed}")
+    show_message("Scene setup complete. You can now:")
+    show_message("1. Press Alt+A to play/restart the animation")
+    show_message("2. Press Spacebar to pause")
+    show_message("3. Use the timeline to scrub through the animation")
+    show_message(f"4. To recreate this exact arrangement, use seed: {seed}")
+    
+    show_message("\nAutomatic capture enabled - new images will be taken at the end of each loop")
+
+# Make sure to unregister the class when the script is reloaded
+if "AutoCaptureOperator" in bpy.types.Operator.__subclasses__():
+    bpy.utils.unregister_class(AutoCaptureOperator)
 
 if __name__ == "__main__":
-    main() 
+    try:
+        main()
+    except Exception as e:
+        show_message(f"Error occurred: {str(e)}")
+        show_message(traceback.format_exc())
