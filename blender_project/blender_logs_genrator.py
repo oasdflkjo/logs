@@ -28,9 +28,9 @@ VERTICAL_SPACING = 0.4    # Space between logs in vertical direction
 BATCH_SIZE = 3           # How many logs to spawn at once
 
 # Physics configuration
-PHYSICS_TIME_SCALE = 2.0    # Speed up physics (2x faster)
-PHYSICS_STEPS = 10          # Frames to simulate between spawns
-PHYSICS_ITERATIONS = 10     # Solver iterations (lower = faster but less accurate)
+PHYSICS_TIME_SCALE = 1.0    # Normal physics speed
+PHYSICS_STEPS = 5           # Fewer steps between spawns
+PHYSICS_ITERATIONS = 5      # Fewer solver iterations
 
 def show_message(message):
     """Simple message display"""
@@ -50,6 +50,44 @@ def set_random_seed():
 def clear_scene():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete()
+
+def setup_materials():
+    """Create and return materials for logs and ground"""
+    # Wood material for logs
+    wood_mat = bpy.data.materials.new(name="Wood_Material")
+    wood_mat.use_nodes = False  # Use simple material
+    wood_mat.diffuse_color = (0.8, 0.6, 0.4, 1)  # Wooden color
+    
+    # Ground material
+    ground_mat = bpy.data.materials.new(name="Ground_Material")
+    ground_mat.use_nodes = False  # Use simple material
+    ground_mat.diffuse_color = (0.2, 0.2, 0.2, 1)  # Dark grey
+    
+    return wood_mat, ground_mat
+
+def setup_lighting():
+    """Set up scene lighting"""
+    # Remove any existing lights
+    for obj in bpy.data.objects:
+        if obj.type == 'LIGHT':
+            bpy.data.objects.remove(obj, do_unlink=True)
+    
+    # Add single sun light
+    bpy.ops.object.light_add(type='SUN', location=(0, 0, 10))
+    sun = bpy.context.active_object
+    sun.data.energy = 3.0
+    sun.rotation_euler = (math.radians(45), math.radians(45), 0)
+    
+    # Basic render settings
+    scene = bpy.context.scene
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    
+    # Set up viewport shading for better preview
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            space = area.spaces[0]
+            space.shading.type = 'RENDERED'  # Show rendered preview
+            break
 
 def create_ground():
     # Create initial plane
@@ -95,6 +133,10 @@ def create_ground():
     bpy.ops.object.modifier_apply(modifier="Subdivision")
     bpy.ops.object.modifier_apply(modifier="Bowl_Shape")
     
+    # Add material to ground
+    wood_mat, ground_mat = setup_materials()
+    ground.data.materials.append(ground_mat)
+    
     show_message("Created subtle bowl-shaped ground")
 
 def spawn_log(index):
@@ -136,35 +178,63 @@ def spawn_log(index):
     log.rigid_body.linear_damping = 0.6
     log.rigid_body.angular_damping = 0.6
     
+    # Add material to log
+    wood_mat = bpy.data.materials.get("Wood_Material")
+    if not wood_mat:
+        wood_mat, _ = setup_materials()
+    log.data.materials.append(wood_mat)
+    
     return log
 
-class AutoCaptureOperator(bpy.types.Operator):
-    """Operator that captures scene state at end of animation"""
-    bl_idname = "scene.auto_capture"
-    bl_label = "Auto Capture"
-    
-    _timer = None
-    
-    def modal(self, context, event):
-        if event.type == 'TIMER':
-            if context.scene.frame_current == context.scene.frame_end:
-                show_message("\nEnd of animation loop - capturing state...")
-                scanner = VirtualLidarScanner()
-                scanner.metadata_seed = context.scene.get('random_seed', None)
-                capture_final_state(scanner)
+def frame_change_handler(scene):
+    """Simple frame change handler with better error handling"""
+    try:
+        # Get the last capture frame
+        last_capture = scene.get('last_capture_frame', 0)
+        current_frame = scene.frame_current
         
-        return {'PASS_THROUGH'}
-    
-    def execute(self, context):
-        wm = context.window_manager
-        self._timer = wm.event_timer_add(0.1, window=context.window)
-        wm.modal_handler_add(self)
-        return {'RUNNING_MODAL'}
-    
-    def cancel(self, context):
-        if self._timer:
-            context.window_manager.event_timer_remove(self._timer)
-        return {'CANCELLED'}
+        show_message(f"Frame handler: current={current_frame}, last_capture={last_capture}")
+        
+        # Only capture if we're at the end and haven't captured recently
+        if (current_frame == scene.frame_end and 
+            current_frame != last_capture):
+            
+            show_message("\nEnd of animation loop - attempting capture...")
+            
+            try:
+                # Stop the animation first
+                bpy.ops.screen.animation_cancel()
+                
+                # Wait a moment for physics to settle
+                bpy.context.view_layer.update()
+                
+                # Attempt capture
+                scanner = VirtualLidarScanner()
+                scanner.metadata_seed = scene.get('random_seed', None)
+                capture_final_state(scanner)
+                
+                # Update last capture frame only if capture succeeds
+                scene['last_capture_frame'] = current_frame
+                show_message("Capture complete")
+                
+                # Reset to start frame
+                scene.frame_current = scene.frame_start
+                
+            except Exception as capture_error:
+                show_message(f"Capture error: {str(capture_error)}")
+                show_message(traceback.format_exc())
+                # Force animation to stop and reset
+                bpy.ops.screen.animation_cancel()
+                scene.frame_current = scene.frame_start
+                # Mark as captured anyway to prevent loop
+                scene['last_capture_frame'] = current_frame
+            
+    except Exception as e:
+        show_message(f"Frame handler error: {str(e)}")
+        show_message(traceback.format_exc())
+        # Emergency stop
+        bpy.ops.screen.animation_cancel()
+        scene.frame_current = scene.frame_start
 
 def setup_scene():
     # Set up the physics scene
@@ -179,15 +249,24 @@ def setup_scene():
     # Set up rigid body world with faster settings
     scene.rigidbody_world.enabled = True
     scene.rigidbody_world.solver_iterations = PHYSICS_ITERATIONS
-    scene.rigidbody_world.time_scale = PHYSICS_TIME_SCALE  # Speed up physics
+    scene.rigidbody_world.time_scale = PHYSICS_TIME_SCALE
     
-    # Set animation range
+    # Set animation settings
     scene.frame_start = 1
     scene.frame_end = SIMULATION_FRAMES
     scene.frame_current = 1
     
-    # Set scene frame rate
+    # Basic animation settings
     scene.render.fps = 24
+    scene.use_preview_range = False
+    
+    # Set playback settings to prevent auto-repeat
+    for screen in bpy.data.screens:
+        for area in screen.areas:
+            if area.type == 'DOPESHEET_EDITOR':
+                area.spaces[0].show_seconds = False
+            elif area.type == 'TIMELINE':
+                area.spaces[0].show_seconds = False
     
     # Camera setup
     camera_distance = 15
@@ -217,9 +296,24 @@ def setup_scene():
             area.spaces[0].region_3d.view_perspective = 'CAMERA'
             break
 
-    # Register and start the auto-capture operator
-    bpy.utils.register_class(AutoCaptureOperator)
-    bpy.ops.scene.auto_capture()
+    # Initialize last capture frame
+    scene['last_capture_frame'] = 0
+    
+    # Set up frame handler
+    bpy.app.handlers.frame_change_post.clear()
+    bpy.app.handlers.frame_change_post.append(frame_change_handler)
+    
+    # Set up basic materials and lighting
+    setup_materials()
+    setup_lighting()
+    
+    # Basic viewport settings
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            area.spaces[0].shading.type = 'SOLID'
+            area.spaces[0].shading.light = 'STUDIO'
+            area.spaces[0].shading.color_type = 'MATERIAL'
+            break
     
     show_message("Added automatic capture at end of each loop")
 
@@ -277,10 +371,6 @@ def main():
     show_message(f"4. To recreate this exact arrangement, use seed: {seed}")
     
     show_message("\nAutomatic capture enabled - new images will be taken at the end of each loop")
-
-# Make sure to unregister the class when the script is reloaded
-if "AutoCaptureOperator" in bpy.types.Operator.__subclasses__():
-    bpy.utils.unregister_class(AutoCaptureOperator)
 
 if __name__ == "__main__":
     try:

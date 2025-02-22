@@ -121,13 +121,20 @@ def capture_final_state(scanner=None):
         current_count = scene.get('loop_count', 0)
         scene['loop_count'] = current_count + 1
         
+        # Make sure we're in a good state for rendering
+        bpy.context.view_layer.update()
+        
+        # Attempt capture
         capture_id = scanner.capture_scene()
         print(f"Scene captured successfully. Capture ID: {capture_id}")
         print(f"Loop #{scene['loop_count']}")
         print(f"Files saved in: {scanner.output_dir}")
+        return True
+        
     except Exception as e:
         print(f"Error capturing scene: {str(e)}")
-        print(traceback.format_exc())  # Add full traceback for better debugging
+        print(traceback.format_exc())
+        return False
 
 if __name__ == "__main__":
     capture_final_state() 
