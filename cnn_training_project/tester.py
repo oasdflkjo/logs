@@ -11,6 +11,7 @@ from pointnet_modified import PointNet
 from dataset import PointCloudDataset
 import json
 from collections import defaultdict
+import torch.nn.functional as F
 
 class PointCloudViewer:
     def __init__(self, output_dir="C:\\output"):
@@ -261,6 +262,46 @@ class PointCloudViewer:
         
         plt.tight_layout(rect=[0.05, 0.02, 0.95, 0.92])
         self.fig.canvas.draw_idle()
+
+def predict_logs(model, point_cloud):
+    """
+    Predict number of logs in a point cloud
+    
+    Args:
+        model: trained PointNet model
+        point_cloud: numpy array of shape (N, 3)
+    Returns:
+        predicted number of logs
+    """
+    # Preprocess the point cloud
+    processed_cloud = PointCloudDataset.preprocess_point_cloud(point_cloud)
+    
+    # Add batch dimension and move to device
+    processed_cloud = processed_cloud.unsqueeze(0).to(model.device)
+    
+    # Get prediction
+    model.eval()
+    with torch.no_grad():
+        classification, regression = model(processed_cloud)
+        
+        # Use the same prediction logic as in training
+        class_probs = F.softmax(classification, dim=1)
+        confidence = class_probs.max(1)[0]
+        class_pred = classification.argmax(1)
+        reg_pred = regression.squeeze()
+        
+        # Special handling for empty scenes
+        empty_scene_conf = class_probs[:, 0]
+        
+        if empty_scene_conf > 0.9:
+            final_pred = 0
+        elif confidence > 0.8:
+            final_pred = class_pred.item()
+        else:
+            weighted_pred = (class_pred.float() * 0.4 + reg_pred * 0.6)
+            final_pred = int(weighted_pred.round().clamp(0, 20).item())
+    
+    return final_pred
 
 def main():
     try:

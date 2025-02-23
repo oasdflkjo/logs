@@ -27,6 +27,11 @@ def save_plt_to_img():
 def evaluate_model(all_predictions, all_targets):
     print("\nEvaluating model...")
     
+    # Filter out predictions and targets where target is 0
+    mask = all_targets != 0
+    all_predictions = all_predictions[mask]
+    all_targets = all_targets[mask]
+    
     # Make sure both arrays have the same shape
     if len(all_predictions) != len(all_targets):
         print(f"Warning: Shape mismatch - predictions: {all_predictions.shape}, targets: {all_targets.shape}")
@@ -40,7 +45,8 @@ def evaluate_model(all_predictions, all_targets):
     mae = np.abs(all_predictions - all_targets).mean()
     
     # Create confusion matrix
-    cm = confusion_matrix(all_targets, all_predictions)
+    cm = confusion_matrix(all_targets, all_predictions, 
+                         labels=range(1, 21))  # Only use labels 1-20
     
     # Generate timestamp for the report
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -51,7 +57,9 @@ def evaluate_model(all_predictions, all_targets):
     with PdfPages(pdf_filename) as pdf:
         # Plot confusion matrix
         plt.figure(figsize=(12, 10))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='viridis')
+        sns.heatmap(cm, annot=True, fmt='d', cmap='viridis',
+                   xticklabels=range(1, 21),  # Labels from 1-20
+                   yticklabels=range(1, 21))  # Labels from 1-20
         plt.title('Confusion Matrix')
         plt.xlabel('Predicted Log Count')
         plt.ylabel('Actual Log Count')
@@ -60,8 +68,8 @@ def evaluate_model(all_predictions, all_targets):
         
         # Plot prediction distribution
         plt.figure(figsize=(12, 6))
-        plt.hist(all_predictions, bins=20, alpha=0.5, label='Predictions')
-        plt.hist(all_targets, bins=20, alpha=0.5, label='Actual')
+        plt.hist(all_predictions, bins=19, alpha=0.5, label='Predictions', range=(1, 20))
+        plt.hist(all_targets, bins=19, alpha=0.5, label='Actual', range=(1, 20))
         plt.title('Distribution of Predictions vs Actual')
         plt.xlabel('Log Count')
         plt.ylabel('Frequency')
@@ -91,6 +99,12 @@ def main():
     dataset = PointCloudDataset("C:/output", num_points=4096, device=device)
     model = PointNet(num_classes=21).to(device)
     
+    # Add safe globals for weights_only loading
+    from torch.serialization import add_safe_globals
+    add_safe_globals([
+        '_rebuild_device_tensor_from_numpy',
+    ])
+    
     # Load the trained model
     checkpoint = torch.load('best_model.pth')
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -114,8 +128,15 @@ def main():
     
     with torch.no_grad():
         for i, (points, labels) in enumerate(dataloader):
-            outputs = model(points)
-            predictions = outputs.argmax(1).cpu().numpy()
+            classification, regression = model(points)  # Get both outputs
+            
+            # Combine classification and regression predictions like in training
+            class_pred = classification.argmax(1)
+            reg_pred = regression.squeeze().round().clamp(0, 20)
+            # Take the average of both predictions
+            final_pred = ((class_pred + reg_pred) / 2).round().long()
+            
+            predictions = final_pred.cpu().numpy()
             targets = labels.cpu().numpy()
             all_predictions.extend(predictions)
             all_targets.extend(targets)

@@ -2,42 +2,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2, alpha=None):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
+
 class PointNet(nn.Module):
-    def __init__(self, num_classes=21):
+    def __init__(self, num_classes=20):
         super(PointNet, self).__init__()
         
-        # Initial feature extraction with more channels
+        self.num_classes = num_classes
+        
+        # Initial feature extraction
         self.input_transform = nn.Sequential(
             nn.Conv1d(3, 64, 1),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Conv1d(64, 64, 1),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(64, 128, 1),
+            nn.BatchNorm1d(128),
             nn.ReLU()
         )
         
-        # Add attention mechanism for better feature weighting
+        # Attention mechanism
         self.attention = nn.Sequential(
-            nn.Conv1d(64, 64, 1),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(128, 128, 1),
+            nn.BatchNorm1d(128),
             nn.Sigmoid()
         )
         
-        # Local feature aggregation with skip connections
-        self.local_features1 = nn.Sequential(
-            nn.Conv1d(64, 128, 1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-        )
-        
-        self.local_features2 = nn.Sequential(
-            nn.Conv1d(128, 128, 1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-        )
-        
-        # Global feature extraction with progressive growth
-        self.global_features = nn.Sequential(
+        # Deep feature extraction
+        self.feature_extraction = nn.Sequential(
             nn.Conv1d(128, 256, 1),
             nn.BatchNorm1d(256),
             nn.ReLU(),
@@ -46,27 +47,37 @@ class PointNet(nn.Module):
             nn.ReLU(),
             nn.Conv1d(512, 1024, 1),
             nn.BatchNorm1d(1024),
-            nn.ReLU()
+            nn.ReLU(),
         )
         
-        # Modified counting head with better scaling
-        self.count_features = nn.Sequential(
+        # Classification head
+        self.classification_head = nn.Sequential(
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.BatchNorm1d(512),
-            nn.Dropout(0.5),  # Increased dropout
+            nn.Dropout(0.5),
             nn.Linear(512, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
-            nn.Dropout(0.5),  # Increased dropout
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            # Remove the last BatchNorm to allow more flexible scaling
-            nn.Linear(128, num_classes)
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
         )
         
-        # Initialize weights with better scaling
+        # Regression head
+        self.regression_head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.5),
+            nn.Linear(256, 1),
+            nn.ReLU()  # Ensure non-negative output
+        )
+        
+        # Initialize weights
         self._initialize_weights()
         
     def _initialize_weights(self):
@@ -77,32 +88,45 @@ class PointNet(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-                    
+    
     def forward(self, x):
         # Initial transform
         x = self.input_transform(x)
         
         # Apply attention
-        attention_weights = self.attention(x)
-        x = x * attention_weights
+        attention = self.attention(x)
+        x = x * attention
         
-        # Extract local features with skip connection
-        local_feat1 = self.local_features1(x)
-        local_feat2 = self.local_features2(local_feat1)
-        local_feat = local_feat1 + local_feat2  # Skip connection
+        # Extract features
+        x = self.feature_extraction(x)
         
-        # Extract global features
-        x = self.global_features(local_feat)
-        
-        # Global max pooling with additional average pooling
+        # Global feature pooling
         x_max = torch.max(x, 2)[0]
         x_avg = torch.mean(x, 2)
-        x = (x_max + x_avg) / 2  # Combine both pooling methods
+        x = x_max + x_avg
         
-        # Predict count
-        x = self.count_features(x)
+        # Get classification and regression outputs
+        classification = self.classification_head(x)
+        regression = self.regression_head(x)
         
-        return x
+        return classification, regression
+
+    def get_loss(self, classification, regression, targets):
+        # Adjust targets to 0-19 range (since they're originally 1-20)
+        adjusted_targets = targets - 1
+        
+        # Focal loss for classification
+        focal_loss = FocalLoss(gamma=2)(classification, adjusted_targets)
+        
+        # MSE loss for regression (using original 1-20 range)
+        regression_loss = F.mse_loss(regression.squeeze(), targets.float())
+        
+        # Combine losses with weights
+        weights = torch.linspace(1, 2, self.num_classes, device=targets.device)
+        target_weights = weights[adjusted_targets]
+        
+        total_loss = (focal_loss * target_weights).mean() + (regression_loss).mean()
+        return total_loss
 
 # Optional: Add STN if needed
 class STNkd(nn.Module):

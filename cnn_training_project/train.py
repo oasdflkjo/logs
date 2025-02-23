@@ -16,35 +16,35 @@ import seaborn as sns
 import random
 import os
 from datetime import datetime
+import torch.nn.functional as F
 
 # Setup
 device = torch_directml.device()
 print(f"Using device: {device}")
 
-# Load dataset and verify preprocessing
-dataset = PointCloudDataset("C:/output", num_points=4096, device=device)
-
-# Visualize a few samples
-print("\nVisualizing preprocessing...")
-for i in range(3):  # Show 3 random samples
-    idx = np.random.randint(len(dataset))
-    dataset.visualize_sample(idx)
+# Load dataset with reduced point clouds
+dataset = PointCloudDataset("C:/output", num_points=2048, device=device)  # Reduced from 4096 to 2048
 
 # Print dataset statistics
-log_counts = dataset.get_log_counts()
 print("\nDataset Statistics:")
+print(f"Total samples: {len(dataset)}")
+log_counts = dataset.get_log_counts()
 print(f"Number of different log counts: {len(log_counts)}")
 print(f"Log counts available: {log_counts}")
+for count in sorted(dataset.data_by_log_count.keys()):
+    print(f"Class {count}: {len(dataset.data_by_log_count[count])} samples")
 
-# Create weighted sampler to handle class imbalance
+# Create weighted sampler with balanced weights
 weights = torch.ones(len(dataset))
 for idx in range(len(dataset)):
     _, label = dataset[idx]
-    weights[idx] = 1.0 / dataset.data_by_log_count[label.item()].__len__()
+    label_val = label.item()
+    weights[idx] = 1.0 / dataset.data_by_log_count[label_val].__len__()
+
 sampler = torch.utils.data.WeightedRandomSampler(weights, len(dataset))
 
-# Create data loader with sampler
-batch_size = 8  # Smaller batch size for better generalization
+# Increase batch size since we have fewer points per cloud
+batch_size = 16  # Increased from 8 to 16
 dataloader = DataLoader(
     dataset, 
     batch_size=batch_size, 
@@ -54,7 +54,7 @@ dataloader = DataLoader(
 )
 
 # Model and optimizer
-model = PointNet(num_classes=21).to(device)
+model = PointNet(num_classes=20).to(device)
 
 # Early stopping helper class
 class EarlyStopping:
@@ -75,8 +75,7 @@ class EarlyStopping:
                 self.early_stop = True
 
 # Modify the training setup
-def setup_training(model, learning_rate=0.01):  # Reduced initial LR
-    # Add BatchNorm momentum for better training
+def setup_training(model, learning_rate=0.005):
     for m in model.modules():
         if isinstance(m, nn.BatchNorm1d):
             m.momentum = 0.01
@@ -85,29 +84,28 @@ def setup_training(model, learning_rate=0.01):  # Reduced initial LR
         model.parameters(),
         lr=learning_rate,
         momentum=0.9,
-        weight_decay=0.001,  # Adjusted weight decay
+        weight_decay=0.0005,
         nesterov=True
     )
     
-    # Improved class weights calculation
-    class_weights = torch.ones(21)
+    # Class weights for 20 classes (1-20)
+    class_weights = torch.ones(20)  # Changed from 21 to 20
     total_samples = sum(len(samples) for samples in dataset.data_by_log_count.values())
-    for i in range(21):
+    for i in range(1, 21):  # Changed range to 1-20
         samples = len(dataset.data_by_log_count.get(i, []))
         if samples > 0:
-            class_weights[i] = total_samples / (21 * samples)  # Balanced weighting
+            class_weights[i-1] = total_samples / (20 * samples)  # Adjusted index
     
     class_weights = class_weights.to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     
-    # More conservative scheduler
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
-        factor=0.5,    # More gentle reduction
-        patience=5,    # More patience
+        factor=0.5,
+        patience=7,
         verbose=True,
-        min_lr=1e-5
+        min_lr=1e-6
     )
     
     return optimizer, criterion, scheduler
@@ -115,78 +113,44 @@ def setup_training(model, learning_rate=0.01):  # Reduced initial LR
 # Initialize training components
 optimizer, criterion, scheduler = setup_training(model)
 
+# Simplified visualization
 class TrainingVisualizer:
     def __init__(self):
         self.losses = []
         self.maes = []
         
-        # Create figure and subplots
         plt.ion()  # Interactive mode on
-        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(1, 3, figsize=(15, 5))
+        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(12, 5))
         self.fig.suptitle('Training Progress')
         
-        # Initialize the mesh grid once
-        self.bins = 20
-        x = np.linspace(0, 20, self.bins)
-        y = np.linspace(0, 20, self.bins)
-        self.X, self.Y = np.meshgrid(x, y)
-        
-        # Initialize the colorbar once
-        dummy_data = np.zeros((self.bins, self.bins))
-        self.pcm = self.ax2.pcolormesh(self.X, self.Y, dummy_data, 
-                                      cmap='viridis', shading='auto')
-        self.colorbar = self.fig.colorbar(self.pcm, ax=self.ax2)
-        
-    def update(self, epoch, loss, predictions, targets, mae):
+    def update(self, epoch, loss, mae, predictions=None, targets=None):
         self.losses.append(loss)
         self.maes.append(mae)
         
         epochs = list(range(1, len(self.losses) + 1))
         
-        # Clear previous plots but keep colorbar
+        # Clear previous plots
         self.ax1.clear()
         self.ax2.clear()
-        self.ax3.clear()
         
         # Plot loss
         self.ax1.plot(epochs, self.losses, 'b-')
         self.ax1.set_title(f'Loss: {loss:.4f}')
         self.ax1.set_xlabel('Epoch')
+        self.ax1.set_ylabel('Loss')
         self.ax1.grid(True)
         
-        # Plot 2D density
-        if len(predictions) > 0:
-            # Create 2D histogram
-            hist2d, _, _ = np.histogram2d(predictions, targets, 
-                                        bins=self.bins,
-                                        range=[[0, 20], [0, 20]])
-            
-            # Update the existing pcolormesh
-            self.pcm = self.ax2.pcolormesh(self.X, self.Y, hist2d.T, 
-                                         cmap='viridis', shading='auto')
-            self.colorbar.update_normal(self.pcm)
-            
-            # Add diagonal line for perfect predictions
-            self.ax2.plot([0, 20], [0, 20], 'r--', alpha=0.5)
-            
-            self.ax2.set_title('Prediction vs Target Density')
-            self.ax2.set_xlabel('Predicted Log Count')
-            self.ax2.set_ylabel('Target Log Count')
-            self.ax2.grid(True)
-            self.ax2.set_aspect('equal')
-            self.ax2.set_xlim(0, 20)
-            self.ax2.set_ylim(0, 20)
-        
         # Plot MAE
-        self.ax3.plot(epochs, self.maes, 'r-')
-        self.ax3.set_title(f'MAE: {mae:.2f}')
-        self.ax3.set_xlabel('Epoch')
-        self.ax3.grid(True)
+        self.ax2.plot(epochs, self.maes, 'r-')
+        self.ax2.set_title(f'MAE: {mae:.2f}')
+        self.ax2.set_xlabel('Epoch')
+        self.ax2.set_ylabel('MAE')
+        self.ax2.grid(True)
         
         plt.tight_layout()
         plt.pause(0.1)
 
-# Training loop
+# Training loop with adjusted prediction logic
 def train_one_epoch():
     model.train()
     total_loss = 0
@@ -196,23 +160,42 @@ def train_one_epoch():
     for points, labels in dataloader:
         model.zero_grad(set_to_none=True)
         
-        if random.random() < 0.5:
+        # Reduced noise augmentation since points are already filtered
+        if random.random() < 0.3:  # Reduced probability
             points += torch.randn_like(points) * 0.01
         
-        outputs = model(points)
+        classification, regression = model(points)
         labels = labels.long()
-        loss = criterion(outputs, labels)
         
-        l1_lambda = 0.0001
-        l1_norm = sum(p.abs().sum() for p in model.parameters())
-        loss = loss + l1_lambda * l1_norm
+        loss = model.get_loss(classification, regression, labels)
+        total_loss += loss.item()
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         optimizer.step()
         
-        total_loss += loss.item()
-        predictions.extend(outputs.argmax(1).cpu().numpy())
+        # Modified prediction logic
+        class_pred = classification.argmax(1)
+        reg_pred = regression.squeeze()
+        
+        # Get classification confidence
+        class_probs = F.softmax(classification, dim=1)
+        confidence = class_probs.max(1)[0]
+        
+        # Simplified prediction logic (no empty scene handling needed)
+        final_pred = torch.zeros_like(class_pred)
+        
+        # Two-stage prediction
+        high_conf_mask = confidence > 0.8
+        final_pred[high_conf_mask] = class_pred[high_conf_mask] + 1  # Add 1 to get back to 1-20 range
+        
+        # For low confidence cases, use weighted average
+        low_conf_mask = ~high_conf_mask
+        if low_conf_mask.any():
+            weighted_pred = (class_pred.float() * 0.4 + reg_pred * 0.6)
+            final_pred[low_conf_mask] = (weighted_pred[low_conf_mask].round().clamp(1, 20)).long()
+        
+        predictions.extend(final_pred.cpu().numpy())
         targets.extend(labels.cpu().numpy())
     
     predictions = np.array(predictions)
@@ -221,33 +204,33 @@ def train_one_epoch():
     
     return total_loss / len(dataloader), predictions, targets, mae
 
-# Training with early stopping
-max_epochs = 300  # More epochs
-early_stopping = EarlyStopping(patience=15, min_delta=0.0005)  # More patience
-warmup_epochs = 10  # Longer warmup
-warmup_lr_multiplier = 0.01  # Gentler warmup
-
-# Modify the training loop to save models better
+# Training function
 def train():
     best_mae = float('inf')
     patience_counter = 0
     max_patience = 15
     visualizer = TrainingVisualizer()
     
+    print("\nStarting training...")
     for epoch in range(max_epochs):
+        # Training phase
+        model.train()
         avg_loss, predictions, targets, mae = train_one_epoch()
+        
+        # Update learning rate
         scheduler.step(mae)
         current_lr = optimizer.param_groups[0]['lr']
         
-        # Update visualization with predictions and targets
-        visualizer.update(epoch + 1, avg_loss, predictions, targets, mae)
+        # Update visualization
+        visualizer.update(epoch + 1, avg_loss, mae)
         
+        # Print progress
         print(f"\nEpoch {epoch+1}/{max_epochs}:")
         print(f"Loss: {avg_loss:.4f}")
         print(f"MAE: {mae:.2f} logs")
         print(f"Learning Rate: {current_lr:.6f}")
         
-        # Save if this is the best model
+        # Save best model
         if mae < best_mae:
             best_mae = mae
             patience_counter = 0
@@ -260,8 +243,7 @@ def train():
                 'mae': mae,
                 'training_history': {
                     'losses': visualizer.losses,
-                    'maes': visualizer.maes,
-                    'last_prediction_dist': predictions
+                    'maes': visualizer.maes
                 }
             }, 'best_model.pth')
             
@@ -269,6 +251,7 @@ def train():
         else:
             patience_counter += 1
         
+        # Early stopping check
         if patience_counter >= max_patience:
             print(f"\nEarly stopping triggered! No improvement for {max_patience} epochs")
             break

@@ -6,6 +6,7 @@ import os
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial import cKDTree
 
 class PointCloudDataset(Dataset):
     def __init__(self, data_dir, num_points=1024, device='cpu'):
@@ -39,6 +40,19 @@ class PointCloudDataset(Dataset):
         
         print(f"Total samples: {len(self.data_samples)}")
 
+        # Find and process empty scene for reference
+        self.empty_scene_points = None
+        for idx in range(len(self.data_samples)):
+            sample = self.data_samples[idx]
+            if sample['metadata'].get('num_logs', 0) == 0:
+                point_cloud = np.load(sample['point_cloud'])
+                point_cloud = point_cloud.reshape(-1, 3)
+                mask = point_cloud[:, 2] != 0
+                self.empty_scene_points = point_cloud[mask]
+                break
+
+        print(f"Empty scene reference points: {len(self.empty_scene_points) if self.empty_scene_points is not None else 'None'}")
+
     def __len__(self):
         return len(self.data_samples)
 
@@ -55,29 +69,52 @@ class PointCloudDataset(Dataset):
             idx = np.random.choice(point_cloud.shape[0], num_points, replace=True)
         return point_cloud[idx]
 
+    def normalize_point_cloud(self, point_cloud):
+        """Normalize point cloud with PCA-based alignment and better scaling"""
+        # Center the point cloud
+        centroid = np.mean(point_cloud, axis=0)
+        centered = point_cloud - centroid
+
+        # Compute PCA
+        try:
+            # Get principal axes
+            covariance = np.cov(centered.T)
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            
+            # Sort by eigenvalues in descending order
+            idx = eigenvalues.argsort()[::-1]
+            eigenvalues = eigenvalues[idx]
+            eigenvectors = eigenvectors[:, idx]
+
+            # Align to principal axes
+            aligned = centered @ eigenvectors
+
+            # Scale based on the largest dimension while preserving aspect ratios
+            scale = np.max(np.abs(aligned))
+            if scale > 0:
+                aligned = aligned / scale * 0.9  # Leave some margin from [-1, 1] boundary
+            
+            return aligned
+        except np.linalg.LinAlgError:
+            # Fallback for degenerate cases
+            print("Warning: PCA failed, using basic normalization")
+            scale = np.max(np.abs(centered))
+            if scale > 0:
+                return centered / scale * 0.9
+            return centered
+
     def __getitem__(self, idx):
         sample = self.data_samples[idx]
         
         # Load point cloud
         point_cloud = np.load(sample['point_cloud'])
-        point_cloud = point_cloud.reshape(-1, 3)
         
-        # Only filter points that are exactly at z=0 (ground plane)
-        mask = point_cloud[:, 2] != 0
-        point_cloud = point_cloud[mask]
-        
-        # Simple centering (keep the scale)
-        center = np.mean(point_cloud, axis=0)
-        point_cloud = point_cloud - center
-        
-        # Sample points if needed
-        if point_cloud.shape[0] > self.num_points:
-            idx = np.random.choice(point_cloud.shape[0], self.num_points, replace=False)
-            point_cloud = point_cloud[idx]
-        
-        # Convert to tensor
-        point_cloud = torch.FloatTensor(point_cloud)
-        point_cloud = point_cloud.transpose(0, 1)  # Shape: (3, N)
+        # Use the preprocessing function with empty scene reference
+        point_cloud = self.preprocess_point_cloud(
+            point_cloud, 
+            self.num_points,
+            self.empty_scene_points
+        )
         
         # Get number of logs
         num_logs = sample['metadata'].get('num_logs', 0)
@@ -87,14 +124,6 @@ class PointCloudDataset(Dataset):
     def get_log_counts(self):
         """Return sorted list of unique log counts"""
         return sorted(self.data_by_log_count.keys())
-
-    def normalize_point_cloud(self, point_cloud):
-        """Center and scale point cloud"""
-        centroid = np.mean(point_cloud, axis=0)
-        point_cloud = point_cloud - centroid
-        furthest_distance = np.max(np.sqrt(np.sum(point_cloud**2, axis=1)))
-        point_cloud = point_cloud / furthest_distance
-        return point_cloud
 
     def visualize_preprocessing(self, point_cloud):
         """Debug visualization of preprocessing steps"""
@@ -141,18 +170,106 @@ class PointCloudDataset(Dataset):
         fig = plt.figure(figsize=(15, 5))
         
         # Original
-        ax1 = fig.add_subplot(121, projection='3d')
+        ax1 = fig.add_subplot(131, projection='3d')
         ax1.scatter(original[:, 0], original[:, 1], original[:, 2], s=1)
         ax1.set_title(f"Original - {sample['metadata'].get('num_logs', 0)} logs")
         
-        # Processed
-        ax2 = fig.add_subplot(122, projection='3d')
-        ax2.scatter(processed[:, 0], processed[:, 1], processed[:, 2], s=1)
-        ax2.set_title("After Preprocessing")
+        # After centering
+        centered = original - np.mean(original, axis=0)
+        ax2 = fig.add_subplot(132, projection='3d')
+        ax2.scatter(centered[:, 0], centered[:, 1], centered[:, 2], s=1)
+        ax2.set_title("After Centering")
         
-        for ax in [ax1, ax2]:
-            ax.view_init(elev=5, azim=315)
-            ax.set_box_aspect([1, 1, 0.5])
+        # After PCA alignment and normalization
+        ax3 = fig.add_subplot(133, projection='3d')
+        ax3.scatter(processed[:, 0], processed[:, 1], processed[:, 2], s=1)
+        ax3.set_title("After PCA & Normalization")
+        
+        for ax in [ax1, ax2, ax3]:
+            ax.view_init(elev=20, azim=45)
+            ax.set_box_aspect([1,1,0.5])
         
         plt.tight_layout()
         plt.show()
+
+    @staticmethod
+    def preprocess_point_cloud(point_cloud, num_points=4096, empty_scene_points=None):
+        """
+        Optimized preprocessing function
+        """
+        # Reshape if needed
+        point_cloud = point_cloud.reshape(-1, 3)
+        
+        # Remove ground points
+        mask = point_cloud[:, 2] != 0
+        point_cloud = point_cloud[mask]
+
+        # If we have an empty scene reference, remove matching points
+        if empty_scene_points is not None:
+            # Downsample empty scene points for faster KDTree queries
+            if len(empty_scene_points) > 1000:
+                idx = np.random.choice(len(empty_scene_points), 1000, replace=False)
+                empty_scene_query = empty_scene_points[idx]
+            else:
+                empty_scene_query = empty_scene_points
+            
+            # Create KD-tree for empty scene points
+            empty_tree = cKDTree(empty_scene_query)
+            
+            # Process in batches to prevent memory issues
+            batch_size = 10000
+            unique_points = []
+            
+            for i in range(0, len(point_cloud), batch_size):
+                batch = point_cloud[i:i + batch_size]
+                distances, _ = empty_tree.query(batch, k=1)
+                unique_mask = distances > 0.15
+                unique_points.append(batch[unique_mask])
+            
+            point_cloud = np.concatenate(unique_points) if unique_points else point_cloud[:10]
+            
+            if len(point_cloud) < 10:  # If almost all points filtered out, it's probably an empty scene
+                point_cloud = empty_scene_points[:10]  # Use a few reference points
+
+        # PCA-based normalization
+        centroid = np.mean(point_cloud, axis=0)
+        centered = point_cloud - centroid
+
+        try:
+            # Get principal axes
+            covariance = np.cov(centered.T)
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            
+            # Sort by eigenvalues in descending order
+            idx = eigenvalues.argsort()[::-1]
+            eigenvalues = eigenvalues[idx]
+            eigenvectors = eigenvectors[:, idx]
+
+            # Align to principal axes
+            aligned = centered @ eigenvectors
+
+            # Scale based on the largest dimension while preserving aspect ratios
+            scale = np.max(np.abs(aligned))
+            if scale > 0:
+                aligned = aligned / scale * 0.9
+            point_cloud = aligned
+        except np.linalg.LinAlgError:
+            # Fallback for degenerate cases
+            scale = np.max(np.abs(centered))
+            if scale > 0:
+                point_cloud = centered / scale * 0.9
+            else:
+                point_cloud = centered
+
+        # Sample points
+        if point_cloud.shape[0] > num_points:
+            idx = np.random.choice(point_cloud.shape[0], num_points, replace=False)
+        else:
+            idx = np.random.choice(point_cloud.shape[0], num_points, replace=True)
+        point_cloud = point_cloud[idx]
+        
+        # Convert to tensor and transpose
+        point_cloud = torch.FloatTensor(point_cloud)
+        point_cloud = point_cloud.transpose(0, 1)  # Shape: (3, N)
+        
+        return point_cloud
