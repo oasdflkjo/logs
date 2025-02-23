@@ -14,6 +14,8 @@ from IPython.display import clear_output
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import random
+import os
+from datetime import datetime
 
 # Setup
 device = torch_directml.device()
@@ -210,71 +212,69 @@ warmup_epochs = 10  # Longer warmup
 warmup_lr_multiplier = 0.01  # Gentler warmup
 visualizer = TrainingVisualizer()
 
-best_mae = float('inf')
-epoch = 0
-
-print("\nStarting training...")
-warmup_epochs = 5
-warmup_lr_multiplier = 0.1
-initial_lr = optimizer.param_groups[0]['lr']
-
-while epoch < max_epochs and not early_stopping.early_stop:
-    # Train one epoch
-    avg_loss, accuracy, mae = train_one_epoch()
+# Modify the training loop to save models better
+def train():
+    best_mae = float('inf')
+    best_accuracy = 0
+    patience_counter = 0
+    max_patience = 15
     
-    # Update scheduler with MAE metric
-    scheduler.step(mae)
-    current_lr = optimizer.param_groups[0]['lr']
+    # Training loop
+    for epoch in range(max_epochs):
+        avg_loss, accuracy, mae = train_one_epoch()
+        
+        # Update scheduler based on MAE
+        scheduler.step(mae)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # Update visualization
+        visualizer.update(epoch + 1, avg_loss, accuracy, mae)
+        
+        # Print progress
+        print(f"\nEpoch {epoch+1}/{max_epochs}:")
+        print(f"Loss: {avg_loss:.4f}")
+        print(f"Accuracy: {accuracy:.2f}%")
+        print(f"MAE: {mae:.2f} logs")
+        print(f"Learning Rate: {current_lr:.6f}")
+        
+        # Save if this is the best model
+        if mae < best_mae:
+            best_mae = mae
+            best_accuracy = accuracy
+            patience_counter = 0
+            
+            # Save only as best_model.pth
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'mae': mae,
+                'accuracy': accuracy,
+                'training_history': {
+                    'losses': visualizer.losses,
+                    'accuracies': visualizer.accuracies,
+                    'maes': visualizer.maes
+                }
+            }, 'best_model.pth')
+            
+            print(f"New best model saved! MAE: {mae:.2f}, Accuracy: {accuracy:.2f}%")
+        else:
+            patience_counter += 1
+        
+        # Early stopping check
+        if patience_counter >= max_patience:
+            print(f"\nEarly stopping triggered! No improvement for {max_patience} epochs")
+            break
+        
+        # Check if learning rate is too small
+        if current_lr < scheduler.min_lrs[0]:
+            print("\nLearning rate too small, stopping training")
+            break
     
-    # Update visualization
-    visualizer.update(epoch + 1, avg_loss, accuracy, mae)
-    
-    # Print progress
-    print(f"\nEpoch {epoch+1}/{max_epochs}:")
-    print(f"Loss: {avg_loss:.4f}")
-    print(f"Accuracy: {accuracy:.2f}%")
-    print(f"MAE: {mae:.2f} logs")
-    print(f"Learning Rate: {current_lr:.6f}")
-    
-    # Early stopping check
-    early_stopping(mae)
-    
-    # Save best model
-    if mae < best_mae:
-        best_mae = mae
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'mae': mae,
-            'accuracy': accuracy,
-            'training_history': {
-                'losses': visualizer.losses,
-                'accuracies': visualizer.accuracies,
-                'maes': visualizer.maes
-            }
-        }, 'best_model.pth')
-        print(f"New best model saved! MAE: {mae:.2f}")
-    
-    # Linear warmup
-    if epoch < warmup_epochs:
-        lr = initial_lr * warmup_lr_multiplier + (initial_lr * (1 - warmup_lr_multiplier)) * (epoch / warmup_epochs)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-    
-    epoch += 1
-    
-    # Check if learning rate is too small
-    if current_lr < scheduler.min_lrs[0]:
-        print("\nLearning rate too small, stopping training")
-        break
-
-print(f"\nTraining completed after {epoch} epochs")
-print(f"Best MAE achieved: {best_mae:.2f}")
-
-plt.ioff()  # Turn off interactive mode
-plt.show()  # Keep the final plot visible
+    print(f"\nTraining completed after {epoch + 1} epochs")
+    print(f"Best MAE achieved: {best_mae:.2f}")
+    print(f"Best accuracy achieved: {best_accuracy:.2f}%")
 
 def plot_confusion_matrix(predictions, targets, log_counts):
     cm = confusion_matrix(targets, predictions)
@@ -287,16 +287,27 @@ def plot_confusion_matrix(predictions, targets, log_counts):
     plt.ylabel('Actual')
     plt.show()
 
-# Add this after training loop:
-model.eval()
-all_predictions = []
-all_targets = []
+def main():
+    # Setup and dataset loading code stays at module level
+    
+    # Wrap the training in a main function
+    print("\nStarting training...")
+    train()  # Run the training
+    
+    # Only plot confusion matrix after training is complete
+    print("\nGenerating confusion matrix...")
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for points, labels in dataloader:
+            outputs = model(points)
+            predictions = outputs.argmax(1)
+            all_predictions.extend(predictions.cpu().numpy())
+            all_targets.extend(labels.cpu().numpy())
+    
+    plot_confusion_matrix(all_predictions, all_targets, log_counts)
 
-with torch.no_grad():
-    for points, labels in dataloader:
-        outputs = model(points)
-        predictions = outputs.argmax(1)
-        all_predictions.extend(predictions.cpu().numpy())
-        all_targets.extend(labels.cpu().numpy())
-
-plot_confusion_matrix(all_predictions, all_targets, log_counts)
+if __name__ == "__main__":
+    main()

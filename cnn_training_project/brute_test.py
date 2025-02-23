@@ -52,20 +52,22 @@ def evaluate_model():
         styles['Normal']))
     elements.append(Spacer(1, 20))
 
-    # Evaluate model
-    print("\nEvaluating model...")
+    # Add model architecture details
+    arch_elements = []
+    arch_elements.append(Paragraph("Model Architecture and Training Details", styles['Heading2']))
+    arch_elements.append(Spacer(1, 10))
+    
+    # Get model architecture as string
+    with open('pointnet_modified.py', 'r') as f:
+        model_code = f.read()
+    
+    # Add dataset info
     device = torch_directml.device()
     dataset = PointCloudDataset("C:/output", device=device)
     model = PointNet(num_classes=21).to(device)
     checkpoint = torch.load('best_model.pth')
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    
-    # Evaluate all samples
-    all_predictions = []
-    all_targets = []
-    accuracy_by_count = defaultdict(list)
-    confidence_by_count = defaultdict(list)
     
     total_samples = len(dataset)
     with torch.no_grad():
@@ -78,17 +80,51 @@ def evaluate_model():
             pred = output.argmax(1).item()
             confidence = probs[pred].item() * 100
             
-            all_predictions.append(pred)
-            all_targets.append(target.item())
-            accuracy_by_count[target.item()].append(pred == target.item())
-            confidence_by_count[target.item()].append(confidence)
-            
             if (idx + 1) % 100 == 0:
                 print(f"Processed {idx + 1}/{total_samples} samples")
     
+    # Add model architecture code
+    code_style = ParagraphStyle(
+        'CodeStyle',
+        parent=styles['Code'],
+        fontSize=7,
+        fontName='Courier',
+        spaceAfter=8,
+        spaceBefore=8,
+        backColor=colors.lightgrey,
+        borderWidth=1,
+        borderColor=colors.grey,
+        borderPadding=5
+    )
+    
+    arch_elements.append(Paragraph("Model Architecture Code:", styles['Heading3']))
+    arch_elements.append(Spacer(1, 5))
+    arch_elements.append(Paragraph(model_code, code_style))
+    
+    # Add to document at the beginning after title
+    elements.insert(3, KeepTogether(arch_elements))
+    elements.insert(4, Spacer(1, 20))
+
+    # Evaluate model
+    print("\nEvaluating model...")
+    accuracy_by_count = defaultdict(list)
+    confidence_by_count = defaultdict(list)
+    
+    for idx in range(total_samples):
+        points, target = dataset[idx]
+        points = points.unsqueeze(0)
+        
+        output = model(points)
+        probs = torch.nn.functional.softmax(output, dim=1)[0]
+        pred = output.argmax(1).item()
+        confidence = probs[pred].item() * 100
+        
+        accuracy_by_count[target.item()].append(pred == target.item())
+        confidence_by_count[target.item()].append(confidence)
+    
     # Calculate metrics
-    all_predictions = np.array(all_predictions)
-    all_targets = np.array(all_targets)
+    all_predictions = np.array(list(accuracy_by_count.values())[0])
+    all_targets = np.array(list(accuracy_by_count.keys()))
     overall_accuracy = (all_predictions == all_targets).mean() * 100
     mae = np.abs(all_predictions - all_targets).mean()
     
@@ -189,5 +225,9 @@ def evaluate_model():
     doc.build(elements)
     print(f"\nPDF report generated: model_evaluation_{timestamp}.pdf")
 
+def main():
+    print("\nStarting model evaluation...")
+    evaluate_model()  # This generates the PDF report
+
 if __name__ == "__main__":
-    evaluate_model() 
+    main() 
