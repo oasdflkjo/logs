@@ -13,7 +13,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
-import datetime
+from datetime import datetime
+from matplotlib.backends.backend_pdf import PdfPages
 
 def save_plt_to_img():
     """Save current matplotlib figure to bytes buffer"""
@@ -23,211 +24,111 @@ def save_plt_to_img():
     plt.close()
     return img_buffer
 
-def evaluate_model():
-    # Create PDF document with A4 portrait
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    doc = SimpleDocTemplate(
-        f"model_evaluation_{timestamp}.pdf",
-        pagesize=(8.27 * inch, 11.69 * inch),  # A4 size
-        rightMargin=0.5*inch, 
-        leftMargin=0.5*inch,
-        topMargin=0.5*inch, 
-        bottomMargin=0.5*inch
-    )
+def evaluate_model(all_predictions, all_targets):
+    print("\nEvaluating model...")
     
-    # Adjust figure sizes for A4
-    plt.rcParams['figure.dpi'] = 300
-    plt.rcParams['figure.figsize'] = (7, 7)  # Square aspect ratio for confusion matrix
-    plt.rcParams['font.size'] = 8
-    plt.rcParams['axes.titlesize'] = 10
-    plt.rcParams['axes.labelsize'] = 8
+    # Make sure both arrays have the same shape
+    if len(all_predictions) != len(all_targets):
+        print(f"Warning: Shape mismatch - predictions: {all_predictions.shape}, targets: {all_targets.shape}")
+        # Take the minimum length to ensure they match
+        min_len = min(len(all_predictions), len(all_targets))
+        all_predictions = all_predictions[:min_len]
+        all_targets = all_targets[:min_len]
     
-    # Setup styles and elements
-    styles = getSampleStyleSheet()
-    elements = []
-    elements.append(Paragraph("Point Cloud Log Counter - Model Evaluation", 
-        ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=24, spaceAfter=30)))
-    elements.append(Paragraph(
-        f"Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
-        styles['Normal']))
-    elements.append(Spacer(1, 20))
+    # Calculate metrics
+    overall_accuracy = (all_predictions == all_targets).mean() * 100
+    mae = np.abs(all_predictions - all_targets).mean()
+    
+    # Create confusion matrix
+    cm = confusion_matrix(all_targets, all_predictions)
+    
+    # Generate timestamp for the report
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create PDF report
+    pdf_filename = f'model_evaluation_{timestamp}.pdf'
+    
+    with PdfPages(pdf_filename) as pdf:
+        # Plot confusion matrix
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='viridis')
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted Log Count')
+        plt.ylabel('Actual Log Count')
+        pdf.savefig()
+        plt.close()
+        
+        # Plot prediction distribution
+        plt.figure(figsize=(12, 6))
+        plt.hist(all_predictions, bins=20, alpha=0.5, label='Predictions')
+        plt.hist(all_targets, bins=20, alpha=0.5, label='Actual')
+        plt.title('Distribution of Predictions vs Actual')
+        plt.xlabel('Log Count')
+        plt.ylabel('Frequency')
+        plt.legend()
+        pdf.savefig()
+        plt.close()
+        
+        # Add summary page
+        plt.figure(figsize=(8, 6))
+        plt.text(0.1, 0.9, f'Model Evaluation Summary', fontsize=14, fontweight='bold')
+        plt.text(0.1, 0.8, f'Overall Accuracy: {overall_accuracy:.2f}%')
+        plt.text(0.1, 0.7, f'Mean Absolute Error: {mae:.2f} logs')
+        plt.text(0.1, 0.6, f'Total Samples Evaluated: {len(all_predictions)}')
+        plt.axis('off')
+        pdf.savefig()
+        plt.close()
+    
+    print(f"Evaluation report saved as {pdf_filename}")
+    print(f"Overall Accuracy: {overall_accuracy:.2f}%")
+    print(f"Mean Absolute Error: {mae:.2f} logs")
 
-    # Add model architecture details
-    arch_elements = []
-    arch_elements.append(Paragraph("Model Architecture and Training Details", styles['Heading2']))
-    arch_elements.append(Spacer(1, 10))
+def main():
+    print("\nStarting model evaluation...")
     
-    # Get model architecture as string
-    with open('pointnet_modified.py', 'r') as f:
-        model_code = f.read()
-    
-    # Add dataset info
+    # Initialize device, dataset, model and dataloader
     device = torch_directml.device()
-    dataset = PointCloudDataset("C:/output", device=device)
+    dataset = PointCloudDataset("C:/output", num_points=4096, device=device)
     model = PointNet(num_classes=21).to(device)
+    
+    # Load the trained model
     checkpoint = torch.load('best_model.pth')
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    total_samples = len(dataset)
-    with torch.no_grad():
-        for idx in range(total_samples):
-            points, target = dataset[idx]
-            points = points.unsqueeze(0)
-            
-            output = model(points)
-            probs = torch.nn.functional.softmax(output, dim=1)[0]
-            pred = output.argmax(1).item()
-            confidence = probs[pred].item() * 100
-            
-            if (idx + 1) % 100 == 0:
-                print(f"Processed {idx + 1}/{total_samples} samples")
-    
-    # Add model architecture code
-    code_style = ParagraphStyle(
-        'CodeStyle',
-        parent=styles['Code'],
-        fontSize=7,
-        fontName='Courier',
-        spaceAfter=8,
-        spaceBefore=8,
-        backColor=colors.lightgrey,
-        borderWidth=1,
-        borderColor=colors.grey,
-        borderPadding=5
+    # Create dataloader
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=32,  # Larger batch size for faster evaluation
+        shuffle=False,  # No need to shuffle during evaluation
+        num_workers=0,
+        pin_memory=False
     )
     
-    arch_elements.append(Paragraph("Model Architecture Code:", styles['Heading3']))
-    arch_elements.append(Spacer(1, 5))
-    arch_elements.append(Paragraph(model_code, code_style))
+    all_predictions = []
+    all_targets = []
     
-    # Add to document at the beginning after title
-    elements.insert(3, KeepTogether(arch_elements))
-    elements.insert(4, Spacer(1, 20))
-
-    # Evaluate model
-    print("\nEvaluating model...")
-    accuracy_by_count = defaultdict(list)
-    confidence_by_count = defaultdict(list)
+    # Track progress
+    total_batches = len(dataloader)
+    print(f"\nEvaluating {len(dataset)} samples...")
     
-    for idx in range(total_samples):
-        points, target = dataset[idx]
-        points = points.unsqueeze(0)
-        
-        output = model(points)
-        probs = torch.nn.functional.softmax(output, dim=1)[0]
-        pred = output.argmax(1).item()
-        confidence = probs[pred].item() * 100
-        
-        accuracy_by_count[target.item()].append(pred == target.item())
-        confidence_by_count[target.item()].append(confidence)
+    with torch.no_grad():
+        for i, (points, labels) in enumerate(dataloader):
+            outputs = model(points)
+            predictions = outputs.argmax(1).cpu().numpy()
+            targets = labels.cpu().numpy()
+            all_predictions.extend(predictions)
+            all_targets.extend(targets)
+            
+            # Print progress
+            if (i + 1) % 10 == 0:
+                print(f"Processed {(i + 1) * dataloader.batch_size}/{len(dataset)} samples")
     
-    # Calculate metrics
-    all_predictions = np.array(list(accuracy_by_count.values())[0])
-    all_targets = np.array(list(accuracy_by_count.keys()))
-    overall_accuracy = (all_predictions == all_targets).mean() * 100
-    mae = np.abs(all_predictions - all_targets).mean()
+    # Convert to numpy arrays before evaluation
+    all_predictions = np.array(all_predictions)
+    all_targets = np.array(all_targets)
     
-    per_class_accuracy = {}
-    per_class_confidence = {}
-    per_class_samples = {}
-    
-    for count in sorted(accuracy_by_count.keys()):
-        accuracies = accuracy_by_count[count]
-        confidences = confidence_by_count[count]
-        per_class_accuracy[count] = np.mean(accuracies) * 100
-        per_class_confidence[count] = np.mean(confidences)
-        per_class_samples[count] = len(accuracies)
-    
-    # Add metrics to PDF
-    metrics_elements = []
-    metrics_elements.append(Paragraph("Overall Metrics", styles['Heading2']))
-    metrics_elements.append(Spacer(1, 10))
-    metrics_data = [
-        ["Metric", "Value"],
-        ["Overall Accuracy", f"{overall_accuracy:.2f}%"],
-        ["Mean Absolute Error", f"{mae:.2f} logs"]
-    ]
-    metrics_table = Table(metrics_data)
-    metrics_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black)
-    ]))
-    metrics_elements.append(metrics_table)
-    elements.append(KeepTogether(metrics_elements))
-    elements.append(Spacer(1, 20))
-
-    # Add confusion matrix with adjusted size
-    confusion_elements = []
-    confusion_elements.append(Paragraph("Confusion Matrix", styles['Heading2']))
-    confusion_elements.append(Spacer(1, 10))
-    
-    plt.figure()  # Uses default size set above
-    cm = confusion_matrix(all_targets, all_predictions)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=range(1, 21),
-                yticklabels=range(1, 21),
-                annot_kws={'size': 6})
-    plt.title('Confusion Matrix')
-    plt.xlabel('Predicted Number of Logs')
-    plt.ylabel('Actual Number of Logs')
-    confusion_elements.append(Image(save_plt_to_img(), width=7*inch, height=7*inch))
-    elements.append(KeepTogether(confusion_elements))
-    elements.append(Spacer(1, 20))
-
-    # Add accuracy plot with adjusted size
-    accuracy_elements = []
-    accuracy_elements.append(Paragraph("Accuracy by Log Count", styles['Heading2']))
-    accuracy_elements.append(Spacer(1, 10))
-    
-    plt.figure(figsize=(7, 3.5))  # Wider than tall for bar chart
-    counts = sorted(per_class_accuracy.keys())
-    plt.bar(counts, [per_class_accuracy[c] for c in counts])
-    plt.axhline(y=overall_accuracy, color='r', linestyle='--', 
-                label=f'Overall Accuracy: {overall_accuracy:.1f}%')
-    plt.title('Accuracy by Log Count')
-    plt.xlabel('Number of Logs')
-    plt.ylabel('Accuracy (%)')
-    plt.legend(fontsize=8)
-    accuracy_elements.append(Image(save_plt_to_img(), width=7*inch, height=3.5*inch))
-    elements.append(KeepTogether(accuracy_elements))
-    elements.append(Spacer(1, 20))
-
-    # Add per-class results
-    results_elements = []
-    results_elements.append(Paragraph("Per-class Results", styles['Heading2']))
-    results_elements.append(Spacer(1, 10))
-    per_class_data = [["Log Count", "Accuracy", "Confidence", "Samples"]]
-    for count in sorted(per_class_accuracy.keys()):
-        per_class_data.append([
-            str(count),
-            f"{per_class_accuracy[count]:.2f}%",
-            f"{per_class_confidence[count]:.2f}%",
-            str(per_class_samples[count])
-        ])
-    
-    per_class_table = Table(per_class_data)
-    per_class_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black)
-    ]))
-    results_elements.append(per_class_table)
-    elements.append(KeepTogether(results_elements))
-
-    # Build PDF
-    doc.build(elements)
-    print(f"\nPDF report generated: model_evaluation_{timestamp}.pdf")
-
-def main():
-    print("\nStarting model evaluation...")
-    evaluate_model()  # This generates the PDF report
+    evaluate_model(all_predictions, all_targets)
 
 if __name__ == "__main__":
     main() 

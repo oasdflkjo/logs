@@ -16,17 +16,27 @@ class PointNet(nn.Module):
             nn.ReLU()
         )
         
-        # Local feature aggregation (deeper)
-        self.local_features = nn.Sequential(
+        # Add attention mechanism for better feature weighting
+        self.attention = nn.Sequential(
+            nn.Conv1d(64, 64, 1),
+            nn.BatchNorm1d(64),
+            nn.Sigmoid()
+        )
+        
+        # Local feature aggregation with skip connections
+        self.local_features1 = nn.Sequential(
             nn.Conv1d(64, 128, 1),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Conv1d(128, 128, 1),
-            nn.BatchNorm1d(128),
-            nn.ReLU()
         )
         
-        # Global feature extraction (wider)
+        self.local_features2 = nn.Sequential(
+            nn.Conv1d(128, 128, 1),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+        )
+        
+        # Global feature extraction with progressive growth
         self.global_features = nn.Sequential(
             nn.Conv1d(128, 256, 1),
             nn.BatchNorm1d(256),
@@ -39,34 +49,55 @@ class PointNet(nn.Module):
             nn.ReLU()
         )
         
-        # Counting-specific layers with residual connections
+        # Modified counting head with better scaling
         self.count_features = nn.Sequential(
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.BatchNorm1d(512),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),  # Increased dropout
             nn.Linear(512, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),  # Increased dropout
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.BatchNorm1d(128),
+            # Remove the last BatchNorm to allow more flexible scaling
             nn.Linear(128, num_classes)
         )
         
+        # Initialize weights with better scaling
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    
     def forward(self, x):
         # Initial transform
         x = self.input_transform(x)
         
-        # Extract local features
-        local_feat = self.local_features(x)
+        # Apply attention
+        attention_weights = self.attention(x)
+        x = x * attention_weights
+        
+        # Extract local features with skip connection
+        local_feat1 = self.local_features1(x)
+        local_feat2 = self.local_features2(local_feat1)
+        local_feat = local_feat1 + local_feat2  # Skip connection
         
         # Extract global features
         x = self.global_features(local_feat)
         
-        # Global max pooling
-        x = torch.max(x, 2)[0]
+        # Global max pooling with additional average pooling
+        x_max = torch.max(x, 2)[0]
+        x_avg = torch.mean(x, 2)
+        x = (x_max + x_avg) / 2  # Combine both pooling methods
         
         # Predict count
         x = self.count_features(x)

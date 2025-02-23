@@ -118,7 +118,6 @@ optimizer, criterion, scheduler = setup_training(model)
 class TrainingVisualizer:
     def __init__(self):
         self.losses = []
-        self.accuracies = []
         self.maes = []
         
         # Create figure and subplots
@@ -126,38 +125,63 @@ class TrainingVisualizer:
         self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(1, 3, figsize=(15, 5))
         self.fig.suptitle('Training Progress')
         
-    def update(self, epoch, loss, accuracy, mae):
+        # Initialize the mesh grid once
+        self.bins = 20
+        x = np.linspace(0, 20, self.bins)
+        y = np.linspace(0, 20, self.bins)
+        self.X, self.Y = np.meshgrid(x, y)
+        
+        # Initialize the colorbar once
+        dummy_data = np.zeros((self.bins, self.bins))
+        self.pcm = self.ax2.pcolormesh(self.X, self.Y, dummy_data, 
+                                      cmap='viridis', shading='auto')
+        self.colorbar = self.fig.colorbar(self.pcm, ax=self.ax2)
+        
+    def update(self, epoch, loss, predictions, targets, mae):
         self.losses.append(loss)
-        self.accuracies.append(accuracy)
         self.maes.append(mae)
         
         epochs = list(range(1, len(self.losses) + 1))
         
-        # Clear previous plots
+        # Clear previous plots but keep colorbar
         self.ax1.clear()
         self.ax2.clear()
         self.ax3.clear()
         
-        # Plot metrics
+        # Plot loss
         self.ax1.plot(epochs, self.losses, 'b-')
-        self.ax1.set_title('Loss')
+        self.ax1.set_title(f'Loss: {loss:.4f}')
         self.ax1.set_xlabel('Epoch')
         self.ax1.grid(True)
         
-        self.ax2.plot(epochs, self.accuracies, 'g-')
-        self.ax2.set_title('Accuracy (%)')
-        self.ax2.set_xlabel('Epoch')
-        self.ax2.grid(True)
+        # Plot 2D density
+        if len(predictions) > 0:
+            # Create 2D histogram
+            hist2d, _, _ = np.histogram2d(predictions, targets, 
+                                        bins=self.bins,
+                                        range=[[0, 20], [0, 20]])
+            
+            # Update the existing pcolormesh
+            self.pcm = self.ax2.pcolormesh(self.X, self.Y, hist2d.T, 
+                                         cmap='viridis', shading='auto')
+            self.colorbar.update_normal(self.pcm)
+            
+            # Add diagonal line for perfect predictions
+            self.ax2.plot([0, 20], [0, 20], 'r--', alpha=0.5)
+            
+            self.ax2.set_title('Prediction vs Target Density')
+            self.ax2.set_xlabel('Predicted Log Count')
+            self.ax2.set_ylabel('Target Log Count')
+            self.ax2.grid(True)
+            self.ax2.set_aspect('equal')
+            self.ax2.set_xlim(0, 20)
+            self.ax2.set_ylim(0, 20)
         
+        # Plot MAE
         self.ax3.plot(epochs, self.maes, 'r-')
-        self.ax3.set_title('Mean Absolute Error')
+        self.ax3.set_title(f'MAE: {mae:.2f}')
         self.ax3.set_xlabel('Epoch')
         self.ax3.grid(True)
-        
-        # Add current values to titles
-        self.ax1.set_title(f'Loss: {loss:.4f}')
-        self.ax2.set_title(f'Accuracy: {accuracy:.1f}%')
-        self.ax3.set_title(f'MAE: {mae:.2f}')
         
         plt.tight_layout()
         plt.pause(0.1)
@@ -170,111 +194,91 @@ def train_one_epoch():
     targets = []
     
     for points, labels in dataloader:
-        # Zero grad with model.zero_grad() instead
         model.zero_grad(set_to_none=True)
         
-        # Add some noise to points for regularization
-        if random.random() < 0.5:  # 50% chance of noise
+        if random.random() < 0.5:
             points += torch.randn_like(points) * 0.01
         
         outputs = model(points)
         labels = labels.long()
         loss = criterion(outputs, labels)
         
-        # Add L1 regularization
         l1_lambda = 0.0001
         l1_norm = sum(p.abs().sum() for p in model.parameters())
         loss = loss + l1_lambda * l1_norm
         
         loss.backward()
-        
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-        
         optimizer.step()
         
         total_loss += loss.item()
         predictions.extend(outputs.argmax(1).cpu().numpy())
         targets.extend(labels.cpu().numpy())
     
-    # Calculate metrics
     predictions = np.array(predictions)
     targets = np.array(targets)
-    accuracy = (predictions == targets).mean() * 100
     mae = np.abs(predictions - targets).mean()
     
-    return total_loss / len(dataloader), accuracy, mae
+    return total_loss / len(dataloader), predictions, targets, mae
 
 # Training with early stopping
 max_epochs = 300  # More epochs
 early_stopping = EarlyStopping(patience=15, min_delta=0.0005)  # More patience
 warmup_epochs = 10  # Longer warmup
 warmup_lr_multiplier = 0.01  # Gentler warmup
-visualizer = TrainingVisualizer()
 
 # Modify the training loop to save models better
 def train():
     best_mae = float('inf')
-    best_accuracy = 0
     patience_counter = 0
     max_patience = 15
+    visualizer = TrainingVisualizer()
     
-    # Training loop
     for epoch in range(max_epochs):
-        avg_loss, accuracy, mae = train_one_epoch()
-        
-        # Update scheduler based on MAE
+        avg_loss, predictions, targets, mae = train_one_epoch()
         scheduler.step(mae)
         current_lr = optimizer.param_groups[0]['lr']
         
-        # Update visualization
-        visualizer.update(epoch + 1, avg_loss, accuracy, mae)
+        # Update visualization with predictions and targets
+        visualizer.update(epoch + 1, avg_loss, predictions, targets, mae)
         
-        # Print progress
         print(f"\nEpoch {epoch+1}/{max_epochs}:")
         print(f"Loss: {avg_loss:.4f}")
-        print(f"Accuracy: {accuracy:.2f}%")
         print(f"MAE: {mae:.2f} logs")
         print(f"Learning Rate: {current_lr:.6f}")
         
         # Save if this is the best model
         if mae < best_mae:
             best_mae = mae
-            best_accuracy = accuracy
             patience_counter = 0
             
-            # Save only as best_model.pth
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'mae': mae,
-                'accuracy': accuracy,
                 'training_history': {
                     'losses': visualizer.losses,
-                    'accuracies': visualizer.accuracies,
-                    'maes': visualizer.maes
+                    'maes': visualizer.maes,
+                    'last_prediction_dist': predictions
                 }
             }, 'best_model.pth')
             
-            print(f"New best model saved! MAE: {mae:.2f}, Accuracy: {accuracy:.2f}%")
+            print(f"New best model saved! MAE: {mae:.2f}")
         else:
             patience_counter += 1
         
-        # Early stopping check
         if patience_counter >= max_patience:
             print(f"\nEarly stopping triggered! No improvement for {max_patience} epochs")
             break
         
-        # Check if learning rate is too small
         if current_lr < scheduler.min_lrs[0]:
             print("\nLearning rate too small, stopping training")
             break
     
     print(f"\nTraining completed after {epoch + 1} epochs")
     print(f"Best MAE achieved: {best_mae:.2f}")
-    print(f"Best accuracy achieved: {best_accuracy:.2f}%")
 
 def plot_confusion_matrix(predictions, targets, log_counts):
     cm = confusion_matrix(targets, predictions)
