@@ -12,9 +12,31 @@ class PointCloudDataset(Dataset):
         self.data_dir = data_dir
         self.device = device
         self.num_points = num_points
-        self.data_by_log_count = defaultdict(list)  # Organize by number of logs
+        self.data_by_log_count = defaultdict(list)
         
-        # Organize data by log count
+        # Load empty scene point cloud first
+        empty_scene_file = None
+        for file in os.listdir(data_dir):
+            if 'pointcloud.npy' in file:
+                timetag = '_'.join(file.split('_')[:4])
+                metadata_file = f"{timetag}_metadata.json"
+                
+                if os.path.exists(os.path.join(data_dir, metadata_file)):
+                    with open(os.path.join(data_dir, metadata_file), 'r') as f:
+                        metadata = json.load(f)
+                    
+                    if metadata.get('num_logs', 0) == 0:
+                        empty_scene_file = os.path.join(data_dir, file)
+                        break
+        
+        if empty_scene_file is None:
+            raise ValueError("No empty scene (0 logs) found in dataset!")
+            
+        # Load empty scene and store as numpy array
+        self.empty_scene = np.load(empty_scene_file)
+        self.empty_scene = self.empty_scene.reshape(-1, 3).astype(np.float32)
+        
+        # Organize data by log count, skipping the empty scene
         for file in os.listdir(data_dir):
             if 'pointcloud.npy' in file:
                 timetag = '_'.join(file.split('_')[:4])
@@ -25,12 +47,13 @@ class PointCloudDataset(Dataset):
                         metadata = json.load(f)
                     
                     num_logs = metadata.get('num_logs', 0)
-                    self.data_by_log_count[num_logs].append({
-                        'point_cloud': os.path.join(data_dir, file),
-                        'metadata': metadata
-                    })
+                    if num_logs > 0:  # Skip empty scenes
+                        self.data_by_log_count[num_logs].append({
+                            'point_cloud': os.path.join(data_dir, file),
+                            'metadata': metadata
+                        })
         
-        # Create balanced dataset
+        # Create dataset
         self.data_samples = []
         for log_count in sorted(self.data_by_log_count.keys()):
             samples = self.data_by_log_count[log_count]
@@ -42,18 +65,28 @@ class PointCloudDataset(Dataset):
     def __len__(self):
         return len(self.data_samples)
 
-    def filter_ground_points(self, point_cloud, z_threshold=0.05):
-        """Remove points close to ground level"""
-        mask = np.abs(point_cloud[:, 2]) > z_threshold
-        return point_cloud[mask]
-
-    def sample_points(self, point_cloud, num_points):
-        """Randomly sample a fixed number of points"""
-        if point_cloud.shape[0] >= num_points:
-            idx = np.random.choice(point_cloud.shape[0], num_points, replace=False)
-        else:
-            idx = np.random.choice(point_cloud.shape[0], num_points, replace=True)
-        return point_cloud[idx]
+    def find_different_points(self, point_cloud, threshold=0.05):
+        """Find points that are different from empty scene using numpy comparison"""
+        # Ensure both arrays are float32
+        point_cloud = point_cloud.astype(np.float32)
+        
+        # Create full-size mask
+        mask = np.zeros(point_cloud.shape[0], dtype=bool)
+        
+        # Get minimum size to compare
+        min_size = min(point_cloud.shape[0], self.empty_scene.shape[0])
+        
+        # Compare points up to min_size
+        differences = np.abs(point_cloud[:min_size] - self.empty_scene[:min_size])
+        
+        # Point is different if any coordinate differs by more than threshold
+        mask[:min_size] = np.any(differences > threshold, axis=1)
+        
+        # Points beyond min_size are considered different
+        if point_cloud.shape[0] > min_size:
+            mask[min_size:] = True
+        
+        return mask
 
     def __getitem__(self, idx):
         sample = self.data_samples[idx]
@@ -62,21 +95,28 @@ class PointCloudDataset(Dataset):
         point_cloud = np.load(sample['point_cloud'])
         point_cloud = point_cloud.reshape(-1, 3)
         
-        # Only filter points that are exactly at z=0 (ground plane)
-        mask = point_cloud[:, 2] != 0
+        # Find different points
+        mask = self.find_different_points(point_cloud)
         point_cloud = point_cloud[mask]
         
-        # Simple centering (keep the scale)
-        center = np.mean(point_cloud, axis=0)
-        point_cloud = point_cloud - center
+        # Center the remaining points
+        if point_cloud.shape[0] > 0:  # Add check for empty point cloud
+            center = np.mean(point_cloud, axis=0)
+            point_cloud = point_cloud - center
         
-        # Sample points if needed
-        if point_cloud.shape[0] > self.num_points:
+        # Create array of exact size
+        final_points = np.zeros((self.num_points, 3))
+        
+        if point_cloud.shape[0] >= self.num_points:
+            # If we have more points, randomly sample
             idx = np.random.choice(point_cloud.shape[0], self.num_points, replace=False)
-            point_cloud = point_cloud[idx]
+            final_points = point_cloud[idx]
+        elif point_cloud.shape[0] > 0:
+            # If we have fewer points but not zero, use all points and pad with zeros
+            final_points[:point_cloud.shape[0]] = point_cloud
         
         # Convert to tensor
-        point_cloud = torch.FloatTensor(point_cloud)
+        point_cloud = torch.FloatTensor(final_points)
         point_cloud = point_cloud.transpose(0, 1)  # Shape: (3, N)
         
         # Get number of logs
@@ -98,30 +138,35 @@ class PointCloudDataset(Dataset):
 
     def visualize_preprocessing(self, point_cloud):
         """Debug visualization of preprocessing steps"""
-        fig = plt.figure(figsize=(20, 5))
+        fig = plt.figure(figsize=(15, 5))
         
         # Original
-        ax1 = fig.add_subplot(141, projection='3d')
+        ax1 = fig.add_subplot(131, projection='3d')
         ax1.scatter(point_cloud[:, 0], point_cloud[:, 1], point_cloud[:, 2], s=1)
         ax1.set_title("Original")
         
-        # After ground removal
-        pc_no_ground = self.filter_ground_points(point_cloud)
-        ax2 = fig.add_subplot(142, projection='3d')
-        ax2.scatter(pc_no_ground[:, 0], pc_no_ground[:, 1], pc_no_ground[:, 2], s=1)
-        ax2.set_title("Ground Removed")
+        # After filtering
+        mask = np.abs(point_cloud[:, 2]) > 0.05  # Simple height-based filtering
+        pc_filtered = point_cloud[mask]
+        ax2 = fig.add_subplot(132, projection='3d')
+        ax2.scatter(pc_filtered[:, 0], pc_filtered[:, 1], pc_filtered[:, 2], s=1)
+        ax2.set_title("After Filtering")
         
-        # After normalization
-        pc_normalized = self.normalize_point_cloud(pc_no_ground)
-        ax3 = fig.add_subplot(143, projection='3d')
-        ax3.scatter(pc_normalized[:, 0], pc_normalized[:, 1], pc_normalized[:, 2], s=1)
-        ax3.set_title("Normalized")
+        # After normalization and padding/sampling
+        final_points = np.zeros((self.num_points, 3))
+        if pc_filtered.shape[0] >= self.num_points:
+            idx = np.random.choice(pc_filtered.shape[0], self.num_points, replace=False)
+            final_points = pc_filtered[idx]
+        else:
+            final_points[:pc_filtered.shape[0]] = pc_filtered
         
-        # After sampling
-        pc_sampled = self.sample_points(pc_normalized, self.num_points)
-        ax4 = fig.add_subplot(144, projection='3d')
-        ax4.scatter(pc_sampled[:, 0], pc_sampled[:, 1], pc_sampled[:, 2], s=1)
-        ax4.set_title(f"Sampled ({self.num_points} points)")
+        ax3 = fig.add_subplot(133, projection='3d')
+        ax3.scatter(final_points[:, 0], final_points[:, 1], final_points[:, 2], s=1)
+        ax3.set_title(f"Final ({self.num_points} points)")
+        
+        for ax in [ax1, ax2, ax3]:
+            ax.view_init(elev=5, azim=315)
+            ax.set_box_aspect([1, 1, 0.5])
         
         plt.tight_layout()
         plt.show()

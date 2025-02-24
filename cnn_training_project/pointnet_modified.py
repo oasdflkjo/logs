@@ -54,16 +54,15 @@ class PointNet(nn.Module):
             nn.Linear(1024, 512),
             nn.ReLU(),
             nn.BatchNorm1d(512),
-            nn.Dropout(0.5),  # Increased dropout
+            nn.Dropout(0.5),
             nn.Linear(512, 256),
             nn.ReLU(),
             nn.BatchNorm1d(256),
-            nn.Dropout(0.5),  # Increased dropout
+            nn.Dropout(0.5),
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.BatchNorm1d(128),
-            # Remove the last BatchNorm to allow more flexible scaling
-            nn.Linear(128, num_classes)
+            nn.Linear(128, 1)  # Output a single number
         )
         
         # Initialize weights with better scaling
