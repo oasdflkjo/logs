@@ -6,6 +6,7 @@ import os
 from collections import defaultdict
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from sklearn.neighbors import KDTree
 
 class PointCloudDataset(Dataset):
     def __init__(self, data_dir, num_points=1024, device='cpu'):
@@ -66,27 +67,23 @@ class PointCloudDataset(Dataset):
         return len(self.data_samples)
 
     def find_different_points(self, point_cloud, threshold=0.05):
-        """Find points that are different from empty scene using numpy comparison"""
+        """Fast filtering of points that differ from empty scene"""
         # Ensure both arrays are float32
         point_cloud = point_cloud.astype(np.float32)
         
-        # Create full-size mask
-        mask = np.zeros(point_cloud.shape[0], dtype=bool)
+        # First filter by height (Z coordinate) - much faster initial filter
+        height_threshold = 0.02
+        above_ground = point_cloud[:, 2] > height_threshold
+        point_cloud = point_cloud[above_ground]
         
-        # Get minimum size to compare
-        min_size = min(point_cloud.shape[0], self.empty_scene.shape[0])
+        # Then do a simple distance check from empty scene mean
+        empty_mean = np.mean(self.empty_scene, axis=0)
+        distances = np.abs(point_cloud - empty_mean)
         
-        # Compare points up to min_size
-        differences = np.abs(point_cloud[:min_size] - self.empty_scene[:min_size])
+        # Point is different if it's far enough from empty scene mean in any dimension
+        mask = np.any(distances > threshold, axis=1)
         
-        # Point is different if any coordinate differs by more than threshold
-        mask[:min_size] = np.any(differences > threshold, axis=1)
-        
-        # Points beyond min_size are considered different
-        if point_cloud.shape[0] > min_size:
-            mask[min_size:] = True
-        
-        return mask
+        return point_cloud[mask]
 
     def __getitem__(self, idx):
         sample = self.data_samples[idx]
@@ -95,12 +92,11 @@ class PointCloudDataset(Dataset):
         point_cloud = np.load(sample['point_cloud'])
         point_cloud = point_cloud.reshape(-1, 3)
         
-        # Find different points
-        mask = self.find_different_points(point_cloud)
-        point_cloud = point_cloud[mask]
+        # Apply fast filtering
+        point_cloud = self.find_different_points(point_cloud)
         
         # Center the remaining points
-        if point_cloud.shape[0] > 0:  # Add check for empty point cloud
+        if point_cloud.shape[0] > 0:
             center = np.mean(point_cloud, axis=0)
             point_cloud = point_cloud - center
         
