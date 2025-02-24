@@ -16,6 +16,7 @@ import seaborn as sns
 import random
 import os
 from datetime import datetime
+from visualization import TrainingVisualizer, plot_confusion_matrix, create_training_video
 
 # Setup
 device = torch_directml.device()
@@ -119,78 +120,6 @@ warmup_epochs = 5
 optimizer, criterion, scheduler = setup_training(model, learning_rate=initial_lr)
 warmup_scheduler = WarmupScheduler(optimizer, warmup_epochs, initial_lr)
 
-# Modify the TrainingVisualizer class to be more robust
-class TrainingVisualizer:
-    def __init__(self):
-        self.losses = []
-        self.maes = []
-        self.bins = 20
-        
-        # Create static figure
-        plt.ion()
-        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(1, 3, figsize=(15, 5))
-        self.fig.suptitle('Training Progress')
-        
-        # Initialize plots
-        self.loss_line, = self.ax1.plot([], [], 'b-', label='Loss')
-        self.mae_line, = self.ax3.plot([], [], 'r-', label='MAE')
-        
-        # Setup axes
-        self.ax1.set_xlabel('Epoch')
-        self.ax1.set_title('Loss')
-        self.ax1.grid(True)
-        
-        self.ax2.set_xlabel('Predicted Log Count')
-        self.ax2.set_ylabel('Target Log Count')
-        self.ax2.set_title('Predictions vs Targets')
-        self.ax2.grid(True)
-        
-        self.ax3.set_xlabel('Epoch')
-        self.ax3.set_title('MAE')
-        self.ax3.grid(True)
-        
-        plt.tight_layout()
-        
-    def update(self, epoch, loss, predictions, targets, mae):
-        try:
-            self.losses.append(loss)
-            self.maes.append(mae)
-            epochs = list(range(1, len(self.losses) + 1))
-            
-            # Update loss plot
-            self.ax1.clear()
-            self.ax1.plot(epochs, self.losses, 'b-')
-            self.ax1.set_title(f'Loss: {loss:.4f}')
-            self.ax1.set_xlabel('Epoch')
-            self.ax1.grid(True)
-            
-            # Update density plot
-            self.ax2.clear()
-            if len(predictions) > 0:
-                self.ax2.hist2d(predictions, targets, bins=self.bins, 
-                              range=[[0, 20], [0, 20]], cmap='viridis')
-                self.ax2.plot([0, 20], [0, 20], 'r--', alpha=0.5)
-            self.ax2.set_title('Predictions vs Targets')
-            self.ax2.set_xlabel('Predicted')
-            self.ax2.set_ylabel('Target')
-            self.ax2.grid(True)
-            
-            # Update MAE plot
-            self.ax3.clear()
-            self.ax3.plot(epochs, self.maes, 'r-')
-            self.ax3.set_title(f'MAE: {mae:.2f}')
-            self.ax3.set_xlabel('Epoch')
-            self.ax3.grid(True)
-            
-            plt.tight_layout()
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-            
-        except Exception as e:
-            print(f"Visualization update failed: {e}")
-            # Continue training even if visualization fails
-            pass
-
 # Training loop
 def train_one_epoch():
     model.train()
@@ -243,10 +172,14 @@ warmup_lr_multiplier = 0.01  # Gentler warmup
 
 # Modify the training loop
 def train():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join('training_outputs', timestamp)
+    os.makedirs(output_dir, exist_ok=True)
+    
     best_mae = float('inf')
     patience_counter = 0
-    max_patience = 20  # Increased patience for SGD
-    visualizer = TrainingVisualizer()
+    max_patience = 20
+    visualizer = TrainingVisualizer(save_dir=output_dir)
     
     try:
         for epoch in range(max_epochs):
@@ -328,22 +261,14 @@ def train():
     except Exception as e:
         print(f"\nTraining error: {e}")
     finally:
-        plt.ioff()
-        plt.close('all')
+        visualizer.close()
+        # Create confusion matrix for best model
+        plot_confusion_matrix(predictions, targets, log_counts, save_dir=output_dir)
+        # Create training video
+        create_training_video(output_dir)
         print(f"\nTraining completed. Best MAE: {best_mae:.2f}")
+        print(f"Training outputs saved to: {output_dir}")
 
-def plot_confusion_matrix(predictions, targets, log_counts):
-    cm = confusion_matrix(targets, predictions)
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=True, fmt='d', 
-                xticklabels=log_counts,
-                yticklabels=log_counts)
-    plt.title('Confusion Matrix')
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    plt.show()
-
-# Modify main to handle exceptions
 def main():
     try:
         print("\nStarting training...")
