@@ -8,12 +8,6 @@ This project aims to train a machine learning model to detect log numbers from p
 - **GPU**: AMD RX 6800
 - **Python Version**: 3.11
 - **Deep Learning Framework**: PyTorch (Windows Backend)
-- **Virtual Environment**:
-  ```bash
-  python -m venv venv
-  source venv/bin/activate  # On Linux/Mac
-  venv\Scripts\activate     # On Windows
-  ```
 
 ## Data
 - The dataset consists of **1000 captures**, each containing:
