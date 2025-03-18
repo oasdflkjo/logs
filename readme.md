@@ -1,5 +1,8 @@
 # Tree Log Detection Project
 
+![image](https://github.com/user-attachments/assets/e86c4504-e1af-475e-968a-5db556701f67)
+
+
 This project aims to develop a machine learning model for detecting and counting tree logs using simulated LiDAR point cloud data.
 
 ## Project Checklist
@@ -23,7 +26,7 @@ This project aims to develop a machine learning model for detecting and counting
 
 ### Phase 2: LiDAR Data Generation
 - Simulate LiDAR sensor to generate point cloud data
-- Generate large-scale dataset (target: 10,000 scenes)
+- Generate large-scale dataset (target: 3000 scenes)
 - Dataset will contain:
   - Point cloud data for each scene
   - Ground truth log count per scene
