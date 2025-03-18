@@ -13,7 +13,6 @@ This project aims to develop a machine learning model for detecting and counting
 - [x] Neural network architecture design
 - [x] Model training pipeline
 - [x] Model evaluation and testing
-- [ ] Documentation completion
 
 ## Project Phases
 
