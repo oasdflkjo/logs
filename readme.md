@@ -12,7 +12,7 @@ This project aims to develop a machine learning model for detecting and counting
 - [x] Physics simulation tuning
 - [x] LiDAR sensor simulation
 - [x] Dataset generation pipeline
-- [x] Initial dataset creation (10,000 scenes)
+- [x] Initial dataset creation (3000 scenes)
 - [x] Neural network architecture design
 - [x] Model training pipeline
 - [x] Model evaluation and testing
